@@ -833,7 +833,7 @@ The config file has four top-level functional sections plus the usual top-level 
 |---|---|
 | `ivDefaultPct` | Fallback IV when a leg has no live quote. Stored as a percentage. |
 | `strikeStep` | Strike-grid increment in dollars. Ticker-specific — must be set in the per-ticker override. |
-| `technicalFilter` | Composite technical bias (SMA5/20, RSI(14), N-day momentum, optional 200-day trend). Feeds the opener's macroBias AND the opportunistic-roll rule's bullish/bearish block gates. |
+| `technicalFilter` | Composite technical bias (SMA5/20, RSI(14), N-day momentum, optional 200-day trend). Feeds the opener's macroBias. |
 | `intradayTape` | Per-component config for the intraday tape signal (bar interval, lookback, gap/openToNow/VWAP weights). The blend weight that decides how much this matters lives in `opener.weights.intradayTape`. |
 | `events` | Earnings + ex-div veto policy (blackout window, short-call ex-div rejection, override file path). |
 
@@ -933,7 +933,7 @@ A setup trades **once a day, at the first read that yields a trade** inside the 
 
 **Backtesting a cascade strategy.** `wa ai backtest <TICKER> --strategy <cascade layer>` runs the same opener: it replays each session's cascade readings from stored data (the captured `data/oi` chain, the minute tape and the quote store — the replay `wa analyze cascade-study` uses), books each setup's trade at its first confirmation, and manages it with the layer's rules (trailing stop included; a held spread settles at expiry). Readings are taken from the opener's earliest entry time every `--cadence` minutes (default 1, once a minute as live reads) through its latest entry time; sessions are replayed in parallel ahead of the day loop, so a cold month takes under two minutes (24 sessions in 103 s on a 16-thread laptop) and a year about twenty. A coarser `--cadence` is proportionally faster, but a setup then confirms only at the first grid instant it shows at — up to one cadence later than live — and a confirmation shorter than the cadence is missed. A trade is priced from and stamped at the quote-store minute whose book was struck at the reading's instant. The summary ends with what became of each setup's signals (first confirmations, trades opened, and why the rest were not), so a setup that never trades — a credit floor, an account too small for the option at the default starting cash — is visible; `--lots 1` sizes every trade at one contract regardless of cash. Only days with a captured `data/oi` chain can be replayed. Readings are stored per session under `data/cascade-cache/` (about 10 MB a year), keyed by the build, the read grid and each session's chain and tape files, so a later run of the same build reads them back instead of replaying: a recompile invalidates them on its own, and `--recache` forces a fresh replay after re-backfilling past sessions in the quote store. `scripts/cascade_sweep.py` runs a grid of layer overrides through this — one setup per cell, one backtest at a time — and ranks the cells by total P&L with profit factor, the total without the two best trades, per-year totals, and a training span against a held-out span.
 
-**`rules`** — management rule triggers and thresholds. Each rule's config holds only the gates specific to that rule (stop-loss multipliers, take-profit percentages, roll-specific thresholds). The `opportunisticRoll` block contains `bullishBlockThreshold` / `bearishBlockThreshold` — composite-bias score boundaries that block call rolls in extended-bullish setups and put rolls in extended-bearish setups.
+**`rules`** — management rule triggers and thresholds. Each rule's config holds only the gates specific to that rule (stop-loss multipliers, take-profit percentages, roll-specific thresholds). A section for a rule that no longer exists (such as `opportunisticRoll`, removed with `OpportunisticRollRule`) is ignored.
 
 **`watch`** — long-running `wa ai watch` loop knobs. `tickIntervalSeconds` sets the poll cadence (also the off-hours sleep when waiting for the bell). `startTime` (optional, format `HH:mm` or `HH:mm:ss` ET) schedules the first tick — useful when you want orders placed a few seconds after 09:30 rather than at the exact bell; CLI `--start` overrides.
 
@@ -949,46 +949,10 @@ Rules evaluate per-position in priority order — the first rule to match for a 
 | `TrailingStopRule` | 1 | Any open position that has given back `rules.trailingStop.trailPct` (default 0.20) of what it had at risk at its best level since entry. The position is valued at what closing it fetches now (long legs at the bid, short legs at the ask — a one-sided quote spike cannot lift the peak, and a crossed quote is skipped); the peak starts at the first closing value seen after entry, not at the fill price, so a wide spread alone never counts as a loss. For a long option or any debit structure the stop is `trailPct` below the peak; for a credit spread it is `trailPct` of the width still at risk at the peak (not of the credit, which is inside the spread's quote noise). A structure with no defined max loss is not trailed. Off by default; when on it trails every position of every structure (calendars, diagonals, condors, verticals, single options, whichever strategy or hand opened them) except the structure names listed in `rules.trailingStop.exclude` (e.g. `["ShortCallVertical"]`; a name that is no structure is a config error). The backtest runs the same rule on every position, 0DTE included, and fills its close at the touch. Webull's API has no trailing stop for options, so live the stop is an ordinary **stop order at the broker that the watch loop only raises** (`BrokerStopManager`; needs `autoExecute.management` enabled with `"TrailingStopRule"` in its `rules`, and `submit` for real orders — without it the manager prints what it would place). The broker triggers it, so a fast move in a single option no longer waits for a tick. A long single option's entry goes out as a Webull *bracket* — the entry plus a stop-market child that activates on the fill, `trailPct` under the entry limit — so it is never open without its stop (`rules.trailingStop.bracketSingles`, default true; a stop-market because Webull rejects a stop-limit child, and rejected every spread bracket tried). Everything else (every spread and diagonal) gets a closing stop-limit once it shows up as a position: trigger at the trail level, limit `rules.trailingStop.stopLimitPct` (default 0.05) of the trigger below it (at least one tick), GTC. Each tick the loop measures the position as below and **raises** the stop to the new trail level with an in-place order replace; it never lowers one, and resizes a stop whose quantity no longer matches the position. It only touches stops it placed (`data/broker-stops.json`): a stop you put on by hand in the app is left alone and counts as protection. Any other close — another rule's, or `wa trade close` — cancels the stop first, so a stop sized for the whole position cannot fire on a remainder. A credit structure is not handled by the broker stop (its stop is a buy above the market): the rule below still closes it, as it does any position no broker stop guards (a stop that could not be placed, a dry run). The peak is sampled once per tick and persisted in `data/trailing-stops.json` across restarts. The close rule's own order goes out at the market side (sell at the bid, buy at the ask) for the whole position, and while it rests unfilled it is re-priced to the current market every tick with no cap; a partially filled close is left resting with a warning. `rules.trailingStop.activateAtProfitPct` (unset by default) arms the stop only once the best closing value has reached that profit on the entry — `0.50` = a peak 1.5× the debit, or a credit spread that costs at most half its credit to close; until then nothing guards the position (no close, no broker stop, no entry bracket), and from then on it trails from the peak as usual and stays armed |
 | `CloseBeforeShortExpiryRule` | 2 | Short DTE = 0 and either MTM profit ≥ `minProfitPct` of initial debit, or spot is past the BE band ± `emergencyBreakEvenBufferPct` (emergency close) |
 | `LegInShortRule` | 2 | Single-leg long call/put goes ITM (≥ `minSpotPctITM`%), long delta ≥ `minLongDelta`, profit ≥ `triggerProfitPct` of debit, DTE ≥ `minDTE`, and a short at `targetShortDelta ± shortDeltaTolerance` exists with credit ≥ `minShortCreditPerShare`. Optional VIX / intraday-range regime gates |
-| `OpportunisticRollRule` | 2 | A roll scenario improves P&L-per-day by at least `minImprovementPerDayPerContract` vs holding, and passes all four safety gates |
 | `TakeProfitRule` | 2 | MTM ≥ `pctOfMaxProfit` of the peak net value in the current-date column of the time-decay grid, **or** MTM profit ≥ `profitTargetPctOfDebit` of the initial net debit (fires any day; default 0 = off) |
 | `CompleteCondorRule` | 3 | Held short vertical whose side has earned real distance from spot: sells the opposite-side vertical at the same expiry to complete an iron condor (LegIn with two legs). Mirrors LegInShort's regime/delta-band/min-credit gates — the gates bound the trend-day risk of re-arming a loss on the freshly-sold side. Default off — backtest-negative on our configs; kept as an A/B knob |
 | `DefensiveRollRule` | 3 | Spot within 1% of short strike and short DTE ≤ 3 |
 | `RollShortOnExpiryRule` | 4 | Short DTE ≤ 2 and short mid ≤ $0.10 |
-
-#### OpportunisticRollRule
-
-The opportunistic roll rule selects the highest-theta roll candidate from the scenario engine and accepts it only if it passes four sequential safety gates. If no candidate passes all four gates the rule fires nothing — there is no AlertOnly fallback.
-
-1. **OTM guard** — the new short leg must be out-of-the-money. ITM proposals are blocked unconditionally.
-2. **OTM buffer** — spot must clear a minimum distance from the new short strike. The buffer widens when technicals are extended:
-   ```
-   adjustedOtmPct = baseOtmBufferPct × (1 + |compositeScore| × technicalBufferMultiplier)
-   ```
-3. **Break-even margin** — the position must be profitable at current spot (evaluated at new short expiry) by at least `minBreakEvenMarginPct` of spot. This ensures a meaningful cushion above break-even rather than a bare sign check. The threshold widens with the same technical factor as the OTM buffer.
-4. **Delta cap** — the roll may not increase the net position delta magnitude by more than `maxDeltaIncreasePct`.
-
-When a proposal fires, the rationale includes a safety summary showing what was required vs. achieved:
-```
-[OTM: 2.6% (req 2.2%), BE: +$0.18/sh (min $0.13/sh), Δ: −0.12→−0.09]
-```
-
-**Technical filter** — before any scenario is evaluated, the rule checks a composite technical bias score built from SMA position, RSI, and short-term momentum. When the score exceeds `bullishBlockThreshold` (extended bullish setup) or falls below `bearishBlockThreshold` (extended bearish), the rule skips the position entirely for that tick.
-
-**Config fields** (`rules.opportunisticRoll`):
-
-| Field | Default | Description |
-|---|---|---|
-| `minImprovementPerDayPerContract` | 0.50 | Minimum P&L-per-day-per-contract improvement over holding, in dollars |
-| `ivDefaultPct` | 40 | Default implied volatility used when live IV is unavailable, in percent |
-| `strikeStep` | 0.50 | Strike increment for candidate roll selection |
-| `baseOtmBufferPct` | 2.0 | Minimum OTM distance for new short at neutral technicals, as % of spot |
-| `technicalBufferMultiplier` | 1.5 | Scales OTM buffer and break-even threshold by `(1 + \|score\| × multiplier)` |
-| `maxDeltaIncreasePct` | 25.0 | Maximum allowed delta magnitude increase after the roll, as % of current delta |
-| `minBreakEvenMarginPct` | 0.5 | Minimum required profit cushion at current spot, as % of spot |
-| `technicalFilter.enabled` | true | Enable/disable the technical bias filter |
-| `technicalFilter.lookbackDays` | 20 | Lookback window for SMA and momentum signals |
-| `technicalFilter.bullishBlockThreshold` | 0.25 | Composite score above this blocks the rule (extended bullish) |
-| `technicalFilter.bearishBlockThreshold` | −0.25 | Composite score below this blocks the rule (extended bearish) |
 
 #### LegInShortRule
 
@@ -1801,7 +1765,7 @@ raw = EV / max(1, daysToTarget) / capitalAtRisk
 tech-adjusted = raw × (1 + α · bias · fit)
 ```
 
-`bias` is the composite technical score in `[−1, 1]` from the same SMA/RSI/momentum signals used by the OpportunisticRoll filter. `fit` is the structure's directional sign:
+`bias` is the composite technical score in `[−1, 1]` from the SMA/RSI/momentum signals of `indicators.technicalFilter`. `fit` is the structure's directional sign:
 
 - `+1` for bullish structures: long call, short put vertical, long call diagonal where `long_strike < short_strike`, long put diagonal where `long_strike < short_strike` (positive net delta in either case).
 - `−1` for bearish structures: long put, short call vertical, long call diagonal where `long_strike > short_strike`, long put diagonal where `long_strike > short_strike`.

@@ -9,7 +9,7 @@ namespace WebullAnalytics.AI.Rules;
 /// keeps some delta, but capping upside is fair when each additional $1 of move is worth less in
 /// premium than the day's theta. Emits <see cref="ProposalKind.LegIn"/>.
 ///
-/// Why a separate rule from <c>OpportunisticRollRule</c>: that rule rolls existing shorts on
+/// Why a separate rule from the roll rules: those roll existing shorts on
 /// existing spreads. Single-leg longs have no short to roll — they get a short added, which is
 /// structurally a different operation (cash flow from one new sell-to-open vs a buy-to-close +
 /// sell-to-open pair).
@@ -26,7 +26,7 @@ internal sealed class LegInShortRule : IManagementRule
 	}
 
 	public string Name => "LegInShortRule";
-	// Priority 2 alongside CloseBeforeShortExpiry / OpportunisticRoll / TakeProfit; alphabetical
+	// Priority 2 alongside CloseBeforeShortExpiry / TakeProfit; alphabetical
 	// tiebreak (L between C and O) means we run after CloseBeforeShortExpiry (which only fires on
 	// short-leg expiry day anyway) and before TakeProfit (intent: leg-in instead of flat-close when
 	// both conditions apply on a saturated winner).

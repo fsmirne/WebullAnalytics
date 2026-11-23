@@ -443,7 +443,7 @@ internal sealed class AIScanCommand : AsyncCommand<AIScanSettings>
 			YahooOptionsClient.ApplyToOptionMath(await Backtest.HistoricalRateCache.FetchLiveOrLatestAsync(cancellation));
 
 			var (mgmtExecutor, openerExecutor, _, brokerStops) = AIContext.BuildAutoExecutors(config, settings.Account);
-			var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(config, settings.Pricing, trailingStops: Rules.TrailingStopStore.Default(), brokerProtected: brokerStops != null ? brokerStops.IsProtected : null), config);
+			var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(config, trailingStops: Rules.TrailingStopStore.Default(), brokerProtected: brokerStops != null ? brokerStops.IsProtected : null), config);
 			ProposalSink? mgmtSink = settings.EmitManagementProposals
 				? new ProposalSink(config.LogLevel, config.Ticker, config.Strategy, mode: "scan", suggestPricing: settings.Pricing, ascii: settings.UseTextOutput)
 				: null;
@@ -1085,7 +1085,6 @@ internal sealed class AIBacktestCommand : AsyncCommand<AIBacktestSettings>
 		// the QuickDC/DC chain). Safe only when every enabled structure is 0DTE AND no roll-to-future rule
 		// is active (a roll could otherwise query a later expiry the filter would have dropped).
 		var sameDayExpiryOnly = config.Opener.Structures.MaxDteAcrossEnabled() == 0
-			&& !config.Rules.OpportunisticRoll.Enabled
 			&& !config.Rules.DefensiveRoll.Enabled
 			&& !config.Rules.RollShortOnExpiry.Enabled
 			&& !(config.Rules.CloseBeforeShortExpiry.Enabled && config.Rules.CloseBeforeShortExpiry.RollPastBreakEven);

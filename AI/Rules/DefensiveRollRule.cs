@@ -45,7 +45,7 @@ internal sealed class DefensiveRollRule : IManagementRule
 		var newStrike = shortLeg.CallPut == "C"
 			? shortLeg.Strike + _indicators.StrikeStep
 			: shortLeg.Strike - _indicators.StrikeStep;
-		var newExpiry = NextWeekly(shortLeg.Expiry.Value);
+		var newExpiry = MarketCalendar.NextFridayAfter(shortLeg.Expiry.Value);
 		var newSymbol = MatchKeys.OccSymbol(position.Ticker, newExpiry, newStrike, shortLeg.CallPut!);
 
 		// Look up quotes to estimate the net. If missing, we still emit as AlertOnly (legs get no prices).
@@ -93,14 +93,6 @@ internal sealed class DefensiveRollRule : IManagementRule
 			NetDebit: -netCredit, // negative netDebit = credit
 			Rationale: rationale
 		);
-	}
-
-	/// <summary>Returns the next Friday strictly after the given date (weekly expiry).</summary>
-	private static DateTime NextWeekly(DateTime from)
-	{
-		var d = from.AddDays(1);
-		while (d.DayOfWeek != DayOfWeek.Friday) d = d.AddDays(1);
-		return d;
 	}
 
 	private static (decimal? Low, decimal? High) EstimateBreakEvenBand(OpenPosition position, PositionLeg shortLeg, decimal spot, EvaluationContext ctx)

@@ -63,6 +63,15 @@ internal static class MarketCalendar
 	/// Mon–Fri dailies, so the next open day is always a listed expiry for those roots).</summary>
 	internal static DateTime NextOpenAfter(DateTime date) => NextOpenOnOrAfter(date.Date.AddDays(1));
 
+	/// <summary>The first Friday strictly after <paramref name="date"/>: the next weekly expiry date, NOT moved off a holiday
+	/// (Good Friday, a New Year's Day Friday) — callers price or fetch that date as is.</summary>
+	internal static DateTime NextFridayAfter(DateTime date)
+	{
+		var d = date.AddDays(1);
+		while (d.DayOfWeek != DayOfWeek.Friday) d = d.AddDays(1);
+		return d;
+	}
+
 	/// <summary>True if <paramref name="date"/> is an NYSE/CBOE early-close (1:00pm ET) half-day: the Friday
 	/// after Thanksgiving, July 3 (day before Independence Day), and December 24 (Christmas Eve) — each only
 	/// when it is itself a regular trading day AND the adjacent full holiday falls on its own weekday, so a

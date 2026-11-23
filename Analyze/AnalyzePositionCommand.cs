@@ -718,7 +718,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		if (kind == StructureKind.SingleLong)
 		{
 			var longLeg = legs[0];
-			var shortExpiry = NextWeekly(asOf);
+			var shortExpiry = MarketCalendar.NextFridayAfter(asOf);
 			if (shortExpiry < longLeg.Parsed.ExpiryDate)
 				yield return MatchKeys.OccSymbol(root, shortExpiry, longLeg.Parsed.Strike, callPut);
 		}
@@ -726,11 +726,11 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		{
 			var shortLeg = legs.First(l => l.Action == LegAction.Sell);
 			var longLeg = legs.First(l => l.Action == LegAction.Buy);
-			var newExpiry = NextWeekly(shortLeg.Parsed.ExpiryDate);
+			var newExpiry = MarketCalendar.NextFridayAfter(shortLeg.Parsed.ExpiryDate);
 			yield return MatchKeys.OccSymbol(root, newExpiry, shortLeg.Parsed.Strike, callPut);
 			var newLongExp = longLeg.Parsed.ExpiryDate > newExpiry ? longLeg.Parsed.ExpiryDate : newExpiry.AddDays(21);
 			var oppositeCp = callPut == "C" ? "P" : "C";
-			foreach (var strike in BracketStrikes(spot, settings.StrikeStep))
+			foreach (var strike in StrikeGrid.Bracket(spot, settings.StrikeStep))
 			{
 				if (strike <= 0m) continue;
 				if (strike != shortLeg.Parsed.Strike)
@@ -758,8 +758,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			var longLeg = legs.First(l => l.Action == LegAction.Buy);
 			var strikeOffset = longLeg.Parsed.Strike - shortLeg.Parsed.Strike;
 			var width = Math.Abs(strikeOffset);
-			var newExpiry = NextWeekly(shortLeg.Parsed.ExpiryDate);
-			foreach (var strike in BracketStrikes(spot, settings.StrikeStep))
+			var newExpiry = MarketCalendar.NextFridayAfter(shortLeg.Parsed.ExpiryDate);
+			foreach (var strike in StrikeGrid.Bracket(spot, settings.StrikeStep))
 			{
 				if (strike <= 0m) continue;
 				if (strike != shortLeg.Parsed.Strike)
@@ -772,7 +772,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			}
 
 			var oppositeCp = callPut == "C" ? "P" : "C";
-			foreach (var strike in BracketStrikes(spot, settings.StrikeStep))
+			foreach (var strike in StrikeGrid.Bracket(spot, settings.StrikeStep))
 			{
 				if (!IsComplementaryShortStrike(oppositeCp, strike, spot)) continue;
 				var newLongStrike = ComplementaryLongStrike(oppositeCp, strike, width);
@@ -837,8 +837,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		decimal LongCallAtShortExp(decimal s) => OptionMath.BlackScholes(OptionMath.DividendAdjustedSpot(s, dividends, shortExpiry.Date + OptionMath.MarketClose, longExpiry.Date + OptionMath.MarketClose, OptionMath.RiskFreeRate), longCall.Parsed.Strike, tLongAtShortExp, OptionMath.RiskFreeRate, ivLongCall, "C");
 		// Per-share value of the whole 4-leg position at the short expiry, evaluated at a given spot.
 		decimal ValueAtShortExpiry(decimal s) =>
-			LongPutAtShortExp(s) - Intrinsic(s, shortPut.Parsed.Strike, "P")
-			+ LongCallAtShortExp(s) - Intrinsic(s, shortCall.Parsed.Strike, "C");
+			LongPutAtShortExp(s) - OptionMath.Intrinsic(s, shortPut.Parsed.Strike, "P")
+			+ LongCallAtShortExp(s) - OptionMath.Intrinsic(s, shortCall.Parsed.Strike, "C");
 
 		// 1. Hold to short expiry at current spot.
 		var holdAtNow = ValueAtShortExpiry(spot);
@@ -877,7 +877,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		if (putSideThreatened)
 		{
 			var sideCash = -shortPutMid + longPutMid;
-			var residualAtShortExp = LongCallAtShortExp(spot) - Intrinsic(spot, shortCall.Parsed.Strike, "C");
+			var residualAtShortExp = LongCallAtShortExp(spot) - OptionMath.Intrinsic(spot, shortCall.Parsed.Strike, "C");
 			list.Add(NewScenarioSpread("Close put side (defensive)", legs,
 				$"BUY {shortPut.Symbol} x{shortPut.Qty} @{FmtPrice(shortPutMid)}, SELL {longPut.Symbol} x{longPut.Qty} @{FmtPrice(longPutMid)}",
 				cashNow: sideCash, valueAtTarget: residualAtShortExp, marginDeltaPerContract: 0m, daysToTarget: shortDte,
@@ -886,7 +886,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		else
 		{
 			var sideCash = -shortCallMid + longCallMid;
-			var residualAtShortExp = LongPutAtShortExp(spot) - Intrinsic(spot, shortPut.Parsed.Strike, "P");
+			var residualAtShortExp = LongPutAtShortExp(spot) - OptionMath.Intrinsic(spot, shortPut.Parsed.Strike, "P");
 			list.Add(NewScenarioSpread("Close call side (defensive)", legs,
 				$"BUY {shortCall.Symbol} x{shortCall.Qty} @{FmtPrice(shortCallMid)}, SELL {longCall.Symbol} x{longCall.Qty} @{FmtPrice(longCallMid)}",
 				cashNow: sideCash, valueAtTarget: residualAtShortExp, marginDeltaPerContract: 0m, daysToTarget: shortDte,
@@ -920,8 +920,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		// Helper: intrinsic value of the whole 4-leg position at a given expiration spot. Per-share,
 		// signed so a positive number is what we'd receive if we closed at that intrinsic.
 		decimal IntrinsicAtSpot(decimal s) =>
-			Intrinsic(s, longPut.Parsed.Strike, "P") - Intrinsic(s, shortPut.Parsed.Strike, "P")
-			+ Intrinsic(s, longCall.Parsed.Strike, "C") - Intrinsic(s, shortCall.Parsed.Strike, "C");
+			OptionMath.Intrinsic(s, longPut.Parsed.Strike, "P") - OptionMath.Intrinsic(s, shortPut.Parsed.Strike, "P")
+			+ OptionMath.Intrinsic(s, longCall.Parsed.Strike, "C") - OptionMath.Intrinsic(s, shortCall.Parsed.Strike, "C");
 
 		// 1. Hold to expiry at current spot.
 		var holdAtNow = IntrinsicAtSpot(spot);
@@ -976,7 +976,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		{
 			// Close the put spread: buy back short put, sell back long put.
 			var sideCash = -shortPutMid + longPutMid;
-			var residualAtExpiry = Intrinsic(spot, longCall.Parsed.Strike, "C") - Intrinsic(spot, shortCall.Parsed.Strike, "C");
+			var residualAtExpiry = OptionMath.Intrinsic(spot, longCall.Parsed.Strike, "C") - OptionMath.Intrinsic(spot, shortCall.Parsed.Strike, "C");
 			list.Add(NewScenarioSpread("Close put side (defensive)", legs,
 				$"BUY {shortPut.Symbol} x{shortPut.Qty} @{FmtPrice(shortPutMid)}, SELL {longPut.Symbol} x{longPut.Qty} @{FmtPrice(longPutMid)}",
 				cashNow: sideCash, valueAtTarget: residualAtExpiry, marginDeltaPerContract: 0m, daysToTarget: expiryDte,
@@ -986,7 +986,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		{
 			// Close the call spread: buy back short call, sell back long call.
 			var sideCash = -shortCallMid + longCallMid;
-			var residualAtExpiry = Intrinsic(spot, longPut.Parsed.Strike, "P") - Intrinsic(spot, shortPut.Parsed.Strike, "P");
+			var residualAtExpiry = OptionMath.Intrinsic(spot, longPut.Parsed.Strike, "P") - OptionMath.Intrinsic(spot, shortPut.Parsed.Strike, "P");
 			list.Add(NewScenarioSpread("Close call side (defensive)", legs,
 				$"BUY {shortCall.Symbol} x{shortCall.Qty} @{FmtPrice(shortCallMid)}, SELL {longCall.Symbol} x{longCall.Qty} @{FmtPrice(longCallMid)}",
 				cashNow: sideCash, valueAtTarget: residualAtExpiry, marginDeltaPerContract: 0m, daysToTarget: expiryDte,
@@ -1012,7 +1012,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 		// Signed intrinsic of the whole position held to expiry at spot s (per share): longs add their
 		// intrinsic, shorts subtract it. Right-agnostic, so it covers both put and call condors.
-		decimal IntrinsicAtSpot(decimal s) => ordered.Sum(l => (l.Action == LegAction.Buy ? 1m : -1m) * Intrinsic(s, l.Parsed.Strike, l.Parsed.CallPut));
+		decimal IntrinsicAtSpot(decimal s) => ordered.Sum(l => (l.Action == LegAction.Buy ? 1m : -1m) * OptionMath.Intrinsic(s, l.Parsed.Strike, l.Parsed.CallPut));
 
 		var innerMid = (ordered[1].Parsed.Strike + ordered[2].Parsed.Strike) / 2m;
 		var targets = new (string Label, decimal Spot)[]
@@ -1051,7 +1051,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var longOnlyLegs = new List<(decimal, DateTime, decimal, bool, string)> { (longLeg.Parsed.Strike, longLeg.Parsed.ExpiryDate, iv, true, callPut) };
 
 		// 1. Hold (do nothing). The pinned value is intrinsic at today's spot — for an OTM long, the whole premium lost — so the ranking uses the EV.
-		var valueAtExpiry = Intrinsic(spot, longLeg.Parsed.Strike, callPut);
+		var valueAtExpiry = OptionMath.Intrinsic(spot, longLeg.Parsed.Strike, callPut);
 		var holdDte = Math.Max(1, (longLeg.Parsed.ExpiryDate.Date - asOf.Date).Days);
 		var holdEvPerShare = ExpectedPositionValuePerShare(longLeg.Parsed.Root, longOnlyLegs, longLeg.Parsed.ExpiryDate, asOf, spot, iv, dividends);
 		list.Add(NewScenarioSpread("Hold to expiry", [longLeg], "—",
@@ -1090,7 +1090,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		}
 		else
 		{
-			var shortExpiry = NextWeekly(asOf);
+			var shortExpiry = MarketCalendar.NextFridayAfter(asOf);
 			if (shortExpiry < longLeg.Parsed.ExpiryDate)
 			{
 				var shortParsed = new OptionParsed(longLeg.Parsed.Root, shortExpiry, callPut, longLeg.Parsed.Strike);
@@ -1143,7 +1143,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var shortExp = shortParsed.ExpiryDate;
 		var ivShort = ResolveIV(shortSymbol, settings, quotes);
 		var longAtShortExp = LongValueAt(longLeg.Parsed, ivLong, shortExp, spot, dividends);
-		var shortAtShortExp = Intrinsic(spot, shortParsed.Strike, callPut);
+		var shortAtShortExp = OptionMath.Intrinsic(spot, shortParsed.Strike, callPut);
 		var projected = longAtShortExp - shortAtShortExp;
 		var legsForEv = new List<(decimal, DateTime, decimal, bool, string)>
 		{
@@ -1197,7 +1197,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 	/// expires by then, else Black-Scholes on its residual life at <paramref name="ivLong"/>.</summary>
 	private static decimal LongValueAt(OptionParsed longLeg, decimal ivLong, DateTime target, decimal spot, IReadOnlyList<DividendEvent>? dividends) =>
 		longLeg.ExpiryDate.Date <= target.Date
-			? Intrinsic(spot, longLeg.Strike, longLeg.CallPut)
+			? OptionMath.Intrinsic(spot, longLeg.Strike, longLeg.CallPut)
 			: (decimal)OptionMath.BlackScholes(OptionMath.DividendAdjustedSpot(spot, dividends, target.Date + OptionMath.MarketClose, longLeg.ExpiryDate.Date + OptionMath.MarketClose, OptionMath.RiskFreeRate), longLeg.Strike, MarketClock.CloseToClose(longLeg.Root, target, longLeg.ExpiryDate, minDays: 1), OptionMath.RiskFreeRate, ivLong, longLeg.CallPut);
 
 	private static List<Scenario> GenerateVerticalScenarios(List<PositionSnapshot> legs, AnalyzePositionSettings settings, decimal spot, DateTime asOf, IReadOnlyDictionary<string, OptionContractQuote>? quotes, decimal technicalBias, IReadOnlyList<DividendEvent>? dividends = null)
@@ -1218,8 +1218,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var (longBidNow, _) = LiveBidAsk(quotesForPricing, longLeg.Symbol, longMidNow);
 
 		var currentMargin = MarginCalculator.PairPerContract(shortLeg.Parsed, shortMidNow, longLeg.Parsed, spot);
-		var longAtExpiry = Intrinsic(spot, longLeg.Parsed.Strike, callPut);
-		var shortAtExpiry = Intrinsic(spot, shortLeg.Parsed.Strike, callPut);
+		var longAtExpiry = OptionMath.Intrinsic(spot, longLeg.Parsed.Strike, callPut);
+		var shortAtExpiry = OptionMath.Intrinsic(spot, shortLeg.Parsed.Strike, callPut);
 		var holdNetPerShare = longAtExpiry - shortAtExpiry;
 		var strikeOffset = longLeg.Parsed.Strike - shortLeg.Parsed.Strike;
 
@@ -1250,7 +1250,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		// spot itself (not mirrored) — a roll IS meant to move the short toward a fresh near-the-money
 		// strike, unlike the complementary wing which mirrors the held strike's own OTM distance.
 		var rollLadder = StrikeLadder.Build(shortLeg.Parsed.Root, expiry, callPut, quotesForPricing);
-		var candidateRollStrikes = rollLadder.IsEmpty ? BracketStrikes(spot, settings.StrikeStep) : rollLadder.Around(spot, 1);
+		var candidateRollStrikes = rollLadder.IsEmpty ? StrikeGrid.Bracket(spot, settings.StrikeStep) : rollLadder.Around(spot, 1);
 		foreach (var newStrike in candidateRollStrikes)
 		{
 			if (newStrike <= 0m || newStrike == shortLeg.Parsed.Strike) continue;
@@ -1262,7 +1262,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			var newShortMidSameExp = LiveOrBsMid(quotesForPricing, sameExpSym, spot, newStrike, expiryDte, ivSameExp, callPut, asOf, dividends);
 			var (newShortBidSameExp, _) = LiveBidAsk(quotesForPricing, sameExpSym, newShortMidSameExp);
 			var cashPerShareSameExp = newShortMidSameExp - shortMidNow;
-			var projSameExpPerShare = longAtExpiry - Intrinsic(spot, newStrike, callPut);
+			var projSameExpPerShare = longAtExpiry - OptionMath.Intrinsic(spot, newStrike, callPut);
 			var sameExpShortParsed = new OptionParsed(shortLeg.Parsed.Root, expiry, callPut, newStrike);
 			var sameExpMargin = MarginCalculator.PairPerContract(sameExpShortParsed, newShortMidSameExp, longLeg.Parsed, spot);
 			var sameExpMarginDelta = sameExpMargin - currentMargin;
@@ -1290,7 +1290,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		// is available (tests, --theoretical), which also keeps that path's exact prior behavior.
 		var complementLadder = StrikeLadder.Build(shortLeg.Parsed.Root, expiry, oppositeCp, quotesForPricing);
 		var mirrorStrike = 2m * spot - shortLeg.Parsed.Strike;
-		var candidateShortStrikes = complementLadder.IsEmpty ? BracketStrikes(spot, settings.StrikeStep) : complementLadder.Around(mirrorStrike, 1);
+		var candidateShortStrikes = complementLadder.IsEmpty ? StrikeGrid.Bracket(spot, settings.StrikeStep) : complementLadder.Around(mirrorStrike, 1);
 		foreach (var newShortStrike in candidateShortStrikes)
 		{
 			if (!IsComplementaryShortStrike(oppositeCp, newShortStrike, spot)) continue;
@@ -1309,7 +1309,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			var (newShortBid, _) = LiveBidAsk(quotesForPricing, newShortSym, newShortMidExec);
 			var (_, newLongAsk) = LiveBidAsk(quotesForPricing, newLongSym, newLongMidExec);
 			var cashPerShare = newShortMidExec - newLongMidExec;
-			var newPositionValuePerShare = Intrinsic(spot, newLongStrike, oppositeCp) - Intrinsic(spot, newShortStrike, oppositeCp);
+			var newPositionValuePerShare = OptionMath.Intrinsic(spot, newLongStrike, oppositeCp) - OptionMath.Intrinsic(spot, newShortStrike, oppositeCp);
 			var newShortParsed = new OptionParsed(shortLeg.Parsed.Root, expiry, oppositeCp, newShortStrike);
 			var newLongParsed = new OptionParsed(longLeg.Parsed.Root, expiry, oppositeCp, newLongStrike);
 			var newMargin = MarginCalculator.PairPerContract(newShortParsed, newShortMidExec, newLongParsed, spot);
@@ -1332,8 +1332,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				addedLegs: [UnitLeg(newShortSym, LegAction.Sell, newShortMidExec, newShortParsed), UnitLeg(newLongSym, LegAction.Buy, newLongMidExec, newLongParsed)]);
 		}
 
-		var newExpiry = NextWeekly(expiry);
-		foreach (var newStrike in BracketStrikes(spot, settings.StrikeStep))
+		var newExpiry = MarketCalendar.NextFridayAfter(expiry);
+		foreach (var newStrike in StrikeGrid.Bracket(spot, settings.StrikeStep))
 		{
 			if (newStrike <= 0m) continue;
 
@@ -1354,7 +1354,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			var closeNet = longMidNow - shortMidNow;
 			var openNet = newShortMidExec - newLongMidExec;
 			var cashPerShare = closeNet + openNet;
-			var newProjectedPerShare = Intrinsic(spot, newLongStrike, callPut) - Intrinsic(spot, newStrike, callPut);
+			var newProjectedPerShare = OptionMath.Intrinsic(spot, newLongStrike, callPut) - OptionMath.Intrinsic(spot, newStrike, callPut);
 			var newShortParsed = new OptionParsed(shortLeg.Parsed.Root, newExpiry, callPut, newStrike);
 			var newLongParsed = new OptionParsed(longLeg.Parsed.Root, newExpiry, callPut, newLongStrike);
 			var newMargin = MarginCalculator.PairPerContract(newShortParsed, newShortMidExec, newLongParsed, spot);
@@ -1403,7 +1403,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 		// Compute the "hold" per-share value once — used as the unchanged-portion projection for partial variants.
 		var longAtOriginalExp = LongValueAt(longLeg.Parsed, ivLong, shortLeg.Parsed.ExpiryDate, spot, dividends);
-		var shortAtOriginalExp = Intrinsic(spot, shortLeg.Parsed.Strike, callPut);
+		var shortAtOriginalExp = OptionMath.Intrinsic(spot, shortLeg.Parsed.Strike, callPut);
 		var holdNetPerShare = longAtOriginalExp - shortAtOriginalExp;
 
 		var origShortDte = Math.Max(1, (shortLeg.Parsed.ExpiryDate.Date - asOf.Date).Days);
@@ -1463,7 +1463,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				orderContractsNow: shortLeg.Qty));
 		}
 
-		var newExp = NextWeekly(shortLeg.Parsed.ExpiryDate);
+		var newExp = MarketCalendar.NextFridayAfter(shortLeg.Parsed.ExpiryDate);
 
 		// 4 & 5. Roll short: when a live chain is loaded, sweep ±5 strikes × ±7 expiries via RollCandidateEnumerator
 		// (scoring every candidate on the probability-weighted spot distribution) and surface the top rolls instead of
@@ -1486,7 +1486,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				var newShortMidExec = (cand.Quote.Bid.Value + cand.Quote.Ask.Value) / 2m;
 				var cashPerShare = newShortMidExec - shortMidNow;
 				var longAtNewShortExp = LongValueAt(longLeg.Parsed, ivLong, candExp, spot, dividends);
-				var shortAtNewShortExp = Intrinsic(spot, candStrike, callPut);
+				var shortAtNewShortExp = OptionMath.Intrinsic(spot, candStrike, callPut);
 				var newProjectedPerShare = longAtNewShortExp - shortAtNewShortExp;
 
 				var newLegsForEv = new List<(decimal, DateTime, decimal, bool, string)>
@@ -1541,7 +1541,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 					var newShortMidExec = LiveOrBsMid(quotesForPricing, newSym, spot, shortLeg.Parsed.Strike, dteNewShort, ivNewShort, callPut, asOf, dividends);
 					var cashPerShare = newShortMidExec - shortMidNow;
 					var longAtNewShortExp = LongValueAt(longLeg.Parsed, ivLong, newExp, spot, dividends);
-					var shortAtNewShortExp = Intrinsic(spot, shortLeg.Parsed.Strike, callPut);
+					var shortAtNewShortExp = OptionMath.Intrinsic(spot, shortLeg.Parsed.Strike, callPut);
 					var newProjectedPerShare = longAtNewShortExp - shortAtNewShortExp;
 					var newEvPerShare = ExpectedPositionValuePerShare(shortLeg.Parsed.Root, [(longLeg.Parsed.Strike, longLeg.Parsed.ExpiryDate, ivLong, true, callPut), (shortLeg.Parsed.Strike, newExp, ivNewShort, false, callPut)], newExp, asOf, spot, ivNewShort, dividends);
 					var newShortParsed = new OptionParsed(shortLeg.Parsed.Root, newExp, callPut, shortLeg.Parsed.Strike);
@@ -1565,7 +1565,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			}
 
 			// 4.5. Roll short to bracket strikes, SAME expiry.
-			foreach (var newStrike in BracketStrikes(spot, settings.StrikeStep))
+			foreach (var newStrike in StrikeGrid.Bracket(spot, settings.StrikeStep))
 			{
 				if (newStrike <= 0m || newStrike == shortLeg.Parsed.Strike) continue;
 
@@ -1577,7 +1577,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				var newShortMidSameExp = LiveOrBsMid(quotesForPricing, sameExpSym, spot, newStrike, dteSameExp, ivSameExp, callPut, asOf, dividends);
 				var cashPerShareSameExp = newShortMidSameExp - shortMidNow;
 				var longAtOrigExp = LongValueAt(longLeg.Parsed, ivLong, shortLeg.Parsed.ExpiryDate, spot, dividends);
-				var newShortIntrinsicAtExp = Intrinsic(spot, newStrike, callPut);
+				var newShortIntrinsicAtExp = OptionMath.Intrinsic(spot, newStrike, callPut);
 				var projSameExpPerShare = longAtOrigExp - newShortIntrinsicAtExp;
 				var evSameExpPerShare = ExpectedPositionValuePerShare(shortLeg.Parsed.Root, [(longLeg.Parsed.Strike, longLeg.Parsed.ExpiryDate, ivLong, true, callPut), (newStrike, shortLeg.Parsed.ExpiryDate, ivSameExp, false, callPut)], shortLeg.Parsed.ExpiryDate, asOf, spot, ivSameExp, dividends);
 				var sameExpShortParsed = new OptionParsed(shortLeg.Parsed.Root, shortLeg.Parsed.ExpiryDate, callPut, newStrike);
@@ -1602,7 +1602,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			}
 
 			// 5. Roll short to bracket strikes near spot (one per strike).
-			foreach (var newStrike in BracketStrikes(spot, settings.StrikeStep))
+			foreach (var newStrike in StrikeGrid.Bracket(spot, settings.StrikeStep))
 			{
 				if (newStrike <= 0m || newStrike == shortLeg.Parsed.Strike) continue;
 
@@ -1613,7 +1613,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				var newShortMidExec = LiveOrBsMid(quotesForPricing, newSym, spot, newStrike, dteNewShort, ivNewShort, callPut, asOf, dividends);
 				var cashPerShare = newShortMidExec - shortMidNow;
 				var longAtNewShortExp = LongValueAt(longLeg.Parsed, ivLong, newExp, spot, dividends);
-				var shortAtNewShortExp = Intrinsic(spot, newStrike, callPut);
+				var shortAtNewShortExp = OptionMath.Intrinsic(spot, newStrike, callPut);
 				var newProjectedPerShare = longAtNewShortExp - shortAtNewShortExp;
 				var newEvPerShare = ExpectedPositionValuePerShare(shortLeg.Parsed.Root, [(longLeg.Parsed.Strike, longLeg.Parsed.ExpiryDate, ivLong, true, callPut), (newStrike, newExp, ivNewShort, false, callPut)], newExp, asOf, spot, ivNewShort, dividends);
 				var newShortParsed = new OptionParsed(shortLeg.Parsed.Root, newExp, callPut, newStrike);
@@ -1643,7 +1643,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		{
 			var newShortExp = newExp;
 			var newLongExp = longLeg.Parsed.ExpiryDate > newShortExp ? longLeg.Parsed.ExpiryDate : newShortExp.AddDays(21);
-			foreach (var newStrike in BracketStrikes(spot, settings.StrikeStep))
+			foreach (var newStrike in StrikeGrid.Bracket(spot, settings.StrikeStep))
 			{
 				if (newStrike <= 0m) continue;
 
@@ -1660,7 +1660,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				var openNet = newShortMidExec - newLongMidExec;
 				var cashPerShare = closeNet + openNet;
 				var longAtNewShortExp = (decimal)OptionMath.BlackScholes(OptionMath.DividendAdjustedSpot(spot, dividends, newShortExp.Date + OptionMath.MarketClose, newLongExp.Date + OptionMath.MarketClose, OptionMath.RiskFreeRate), newStrike, MarketClock.CloseToClose(longLeg.Parsed.Root, newShortExp, newLongExp, minDays: 1), OptionMath.RiskFreeRate, ivNewLong, callPut);
-				var shortAtNewShortExp = Intrinsic(spot, newStrike, callPut);
+				var shortAtNewShortExp = OptionMath.Intrinsic(spot, newStrike, callPut);
 				var newProjectedPerShare = longAtNewShortExp - shortAtNewShortExp;
 				var resetLegsForEv = new List<(decimal, DateTime, decimal, bool, string)>
 				{
@@ -2247,16 +2247,6 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		return null;
 	}
 
-	private static DateTime NextWeekly(DateTime from)
-	{
-		var d = from.AddDays(1);
-		while (d.DayOfWeek != DayOfWeek.Friday) d = d.AddDays(1);
-		return d;
-	}
-
-	private static decimal Intrinsic(decimal spot, decimal strike, string callPut) =>
-		callPut == "C" ? Math.Max(0m, spot - strike) : Math.Max(0m, strike - spot);
-
 	/// <summary>Finds campaign break-even spot price(s) at <paramref name="target"/> where the post-action
 	/// position's BS/intrinsic value equals <paramref name="netCostBasisPerShare"/>.</summary>
 	private static List<decimal> ComputeScenarioBreakEvens(
@@ -2275,7 +2265,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			foreach (var (strike, expiry, iv, isLong, cp) in legs)
 			{
 				decimal legVal = expiry.Date <= target.Date
-					? Intrinsic(s, strike, cp)
+					? OptionMath.Intrinsic(s, strike, cp)
 					: (decimal)OptionMath.BlackScholes(
 						OptionMath.DividendAdjustedSpot(s, dividends, targetClose, expiry.Date + OptionMath.MarketClose, OptionMath.RiskFreeRate),
 						strike, MarketClock.CloseToClose(root, target, expiry, minDays: 1), OptionMath.RiskFreeRate, iv, cp);
@@ -2320,7 +2310,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			foreach (var (strike, expiry, iv, isLong, cp) in legs)
 			{
 				var legValue = expiry.Date <= target.Date
-					? Intrinsic(pt.SpotAtExpiry, strike, cp)
+					? OptionMath.Intrinsic(pt.SpotAtExpiry, strike, cp)
 					: (decimal)OptionMath.BlackScholes(OptionMath.DividendAdjustedSpot(pt.SpotAtExpiry, dividends, target.Date + OptionMath.MarketClose, expiry.Date + OptionMath.MarketClose, OptionMath.RiskFreeRate), strike, MarketClock.CloseToClose(root, target, expiry, minDays: 1), OptionMath.RiskFreeRate, iv, cp);
 				value += (isLong ? 1m : -1m) * legValue;
 			}
@@ -2331,16 +2321,6 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 	private static decimal NearestStrike(decimal spot, decimal step) =>
 		Math.Round(spot / step) * step;
-
-	/// <summary>Returns the two strikes bracketing spot on the configured step grid. When spot lands
-	/// exactly on a strike, the same value is yielded once.</summary>
-	private static IEnumerable<decimal> BracketStrikes(decimal spot, decimal step)
-	{
-		var below = Math.Floor(spot / step) * step;
-		var above = Math.Ceiling(spot / step) * step;
-		yield return below;
-		if (above != below) yield return above;
-	}
 
 	// ─── Rendering ───────────────────────────────────────────────────────────
 

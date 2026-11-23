@@ -255,7 +255,6 @@ internal static class BacktestSummaryRenderer
 		"CloseBeforeShortExpiryRule" => "CloseAtExp",
 		"CloseSurvivorOnShortExpiry" => "CloseLeft",
 		"RollShortOnExpiryRule" => "RollShort",
-		"OpportunisticRollRule" => "OppRoll",
 		"DefensiveRollRule" => "DefRoll",
 		"LegInShortRule" => "LegIn",
 		_ => rule.EndsWith("Rule", StringComparison.Ordinal) ? rule[..^4] : rule,

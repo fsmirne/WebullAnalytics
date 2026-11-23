@@ -96,4 +96,22 @@ public class AIConfigMergeTests
 		Assert.Null(AIConfigMerge.LoadMerged(null, null));
 		Assert.Null(AIConfigMerge.LoadMerged("/nonexistent/a.json", "/nonexistent/b.json"));
 	}
+
+	[Fact]
+	public void LoadMerged_ARemovedRuleSectionIsIgnored()
+	{
+		// rules.opportunisticRoll (OpportunisticRollRule, deleted 2026-11-22) is still in every existing ai-config: it must load and validate,
+		// and leave the rules that are still there as configured.
+		var path = Path.Combine(Path.GetTempPath(), $"ai-config-{Guid.NewGuid():N}.json");
+		File.WriteAllText(path, """{"indicators":{"strikeStep":1},"rules":{"opportunisticRoll":{"enabled":true,"minImprovementPerDayPerContract":0.5},"legInShort":{"enabled":true,"minDTE":0}}}""");
+		try
+		{
+			var config = AIConfigMerge.LoadMerged(path);
+			Assert.NotNull(config);
+			Assert.Null(AIConfigLoader.Validate(config!));
+			Assert.True(config!.Rules.LegInShort.Enabled);
+			Assert.Equal(0, config.Rules.LegInShort.MinDTE);
+		}
+		finally { File.Delete(path); }
+	}
 }

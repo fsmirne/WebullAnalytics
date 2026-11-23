@@ -97,16 +97,6 @@
 			"pctOfMaxLoss": 0.75,
 			"thetaExhaustShortMid": 0
 		},
-		"opportunisticRoll": {
-			"enabled": true,
-			"minImprovementPerDayPerContract": 0.50,
-			"baseOtmBufferPct": 0.02,
-			"technicalBufferMultiplier": 1.5,
-			"maxDeltaIncreasePct": 0.25,
-			"minBreakEvenMarginPct": 0.005,
-			"bullishBlockThreshold": 0.25,
-			"bearishBlockThreshold": -0.25
-		},
 		"takeProfit": {
 			"enabled": true
 		},
@@ -158,7 +148,6 @@
 				"StopLossRule",
 				"CloseBeforeShortExpiryRule",
 				"TakeProfitRule",
-				"OpportunisticRollRule",
 				"DefensiveRollRule",
 				"RollShortOnExpiryRule"
 			],

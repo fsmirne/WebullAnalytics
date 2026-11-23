@@ -126,7 +126,7 @@ internal sealed class AIWatchCommand : AsyncCommand<AIWatchSettings>
 		// Auto-executors: turn proposals into real (or dry-run) order submissions. Both off by default;
 		// both honor enabled/submit gates independently. Shared with `wa ai scan` via AIContext.BuildAutoExecutors.
 		var (autoExecutor, openerExecutor, repricer, brokerStops) = AIContext.BuildAutoExecutors(config, settings.Account);
-		var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(config, settings.Pricing, expiryRegimes, Rules.TrailingStopStore.Default(), brokerStops != null ? brokerStops.IsProtected : null), config);
+		var evaluator = new RuleEvaluator(RuleEvaluator.BuildRules(config, expiryRegimes, Rules.TrailingStopStore.Default(), brokerStops != null ? brokerStops.IsProtected : null), config);
 
 		// Apply the live 13-week T-bill risk-free rate once (mirrors `wa ai scan`): the opener's IV back-solve
 		// and BS pricing read OptionMath.RiskFreeRate, so watch must set it too or it prices against a stale

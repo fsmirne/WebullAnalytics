@@ -53,7 +53,7 @@ internal sealed class WatchConfig
 }
 
 /// <summary>Pipeline-wide inputs / measurement knobs. Read by both the opener (for macro bias and
-/// candidate scoring) and the management rules (for opportunistic-roll guards and roll-strike snapping).
+/// candidate scoring) and the management rules (for IV defaults and roll-strike snapping).
 /// Centralized here so duplication is impossible and per-ticker overrides apply uniformly.</summary>
 internal sealed class IndicatorsConfig
 {
@@ -235,7 +235,6 @@ internal sealed class RulesConfig
 	[JsonPropertyName("timeStop")] public TimeStopConfig TimeStop { get; set; } = new() { Enabled = false };
 	[JsonPropertyName("breakEvenGuard")] public BreakEvenGuardConfig BreakEvenGuard { get; set; } = new();
 	[JsonPropertyName("weekendClose")] public WeekendCloseConfig WeekendClose { get; set; } = new();
-	[JsonPropertyName("opportunisticRoll")] public OpportunisticRollConfig OpportunisticRoll { get; set; } = new();
 	[JsonPropertyName("takeProfit")] public TakeProfitConfig TakeProfit { get; set; } = new() { Enabled = false };
 	[JsonPropertyName("trailingStop")] public TrailingStopConfig TrailingStop { get; set; } = new();
 	[JsonPropertyName("defensiveRoll")] public DefensiveRollConfig DefensiveRoll { get; set; } = new() { Enabled = false };
@@ -315,27 +314,6 @@ internal sealed class CompleteCondorConfig
 	/// time the rule evaluates. Trend-day filter — completing into a trend is how you get run over.
 	/// Default 9.99 (disabled). Sensible test value: 0.008 - 0.015.</summary>
 	[JsonPropertyName("maxIntradayRangePct")] public decimal MaxIntradayRangePct { get; set; } = 9.99m;
-}
-
-internal sealed class OpportunisticRollConfig
-{
-	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = true;
-	/// <summary>Minimum P&L-per-day-per-contract improvement (dollars) vs hold required to fire a proposal.</summary>
-	[JsonPropertyName("minImprovementPerDayPerContract")] public decimal MinImprovementPerDayPerContract { get; set; } = 0.50m;
-	/// <summary>Minimum OTM distance required for the new short leg, as a fraction of spot, at neutral technicals. Default 0.02 (2%).</summary>
-	[JsonPropertyName("baseOtmBufferPct")] public decimal BaseOtmBufferPct { get; set; } = 0.02m;
-	/// <summary>Scales the OTM buffer by (1 + |compositeScore| × multiplier) when technicals are extended.</summary>
-	[JsonPropertyName("technicalBufferMultiplier")] public decimal TechnicalBufferMultiplier { get; set; } = 1.5m;
-	/// <summary>Maximum allowed increase in net position delta magnitude after the roll, as a fraction of current delta. Default 0.25 (25%).</summary>
-	[JsonPropertyName("maxDeltaIncreasePct")] public decimal MaxDeltaIncreasePct { get; set; } = 0.25m;
-	/// <summary>Minimum required profit at current spot as a fraction of spot, at neutral technicals. Widens with technical extension using the same multiplier as baseOtmBufferPct. Default 0.005 (0.5%).</summary>
-	[JsonPropertyName("minBreakEvenMarginPct")] public decimal MinBreakEvenMarginPct { get; set; } = 0.005m;
-	/// <summary>Composite technical-bias score above which call positions are blocked from rolling
-	/// (extended bullish setup → don't reach further into the move). Reads the same bias the opener uses.</summary>
-	[JsonPropertyName("bullishBlockThreshold")] public decimal BullishBlockThreshold { get; set; } = 0.25m;
-	/// <summary>Composite technical-bias score below which put positions are blocked from rolling
-	/// (extended bearish setup).</summary>
-	[JsonPropertyName("bearishBlockThreshold")] public decimal BearishBlockThreshold { get; set; } = -0.25m;
 }
 
 internal sealed class StopLossConfig
@@ -503,8 +481,7 @@ internal sealed class CloseBeforeShortExpiryConfig
 
 /// <summary>Composite technical-bias indicator config (SMA5/20, RSI(14), N-day momentum, 200-day
 /// trend gate). Lives at <see cref="IndicatorsConfig.TechnicalFilter"/>; consumed by the opener
-/// (as macro bias for proposal scoring) and the opportunistic-roll rule (as a block gate via
-/// <see cref="OpportunisticRollConfig.BullishBlockThreshold"/> / <see cref="OpportunisticRollConfig.BearishBlockThreshold"/>).</summary>
+/// (as macro bias for proposal scoring).</summary>
 internal sealed class TechnicalFilterConfig
 {
 	[JsonPropertyName("enabled")] public bool Enabled { get; set; } = true;
@@ -651,12 +628,6 @@ internal static class AIConfigLoader
 		if (so.Tranche1Fraction <= 0m || so.Tranche1Fraction >= 1m) return $"autoExecute.management.scaleOut.tranche1Fraction: must be in (0, 1), got {so.Tranche1Fraction}";
 		if (so.Tranche2Fraction <= 0m || so.Tranche2Fraction >= 1m) return $"autoExecute.management.scaleOut.tranche2Fraction: must be in (0, 1), got {so.Tranche2Fraction}";
 		if (so.MinQty < 1) return $"autoExecute.management.scaleOut.minQty: must be ≥ 1, got {so.MinQty}";
-
-		var or = c.Rules.OpportunisticRoll;
-		if (or.BaseOtmBufferPct < 0m) return $"rules.opportunisticRoll.baseOtmBufferPct: must be ≥ 0, got {or.BaseOtmBufferPct}";
-		if (or.TechnicalBufferMultiplier < 0m) return $"rules.opportunisticRoll.technicalBufferMultiplier: must be ≥ 0, got {or.TechnicalBufferMultiplier}";
-		if (or.MaxDeltaIncreasePct < 0m) return $"rules.opportunisticRoll.maxDeltaIncreasePct: must be ≥ 0, got {or.MaxDeltaIncreasePct}";
-		if (or.MinBreakEvenMarginPct < 0m) return $"rules.opportunisticRoll.minBreakEvenMarginPct: must be ≥ 0, got {or.MinBreakEvenMarginPct}";
 
 		var ind = c.Indicators;
 		if (ind.IvDefaultPct <= 0m) return $"indicators.ivDefaultPct: must be > 0, got {ind.IvDefaultPct}";

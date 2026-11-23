@@ -125,10 +125,9 @@ internal sealed class RuleEvaluator
 	/// <summary>Constructs the default rule set from config.</summary>
 	/// <param name="trailingStops">Where <see cref="TrailingStopRule"/> keeps each position's peak mark. Live callers pass the persisted store; the default is in-memory (backtest, replay).</param>
 	/// <param name="brokerProtected">Live: positions a broker stop order already guards, which <see cref="TrailingStopRule"/> leaves alone. Null (backtest, replay) = the rule closes them itself.</param>
-	internal static IReadOnlyList<IManagementRule> BuildRules(AIConfig config, string pricingMode = SuggestionPricing.Mid, ExpiryRegimeProvider? expiryRegimes = null, TrailingStopStore? trailingStops = null, Func<OpenPosition, bool>? brokerProtected = null)
+	internal static IReadOnlyList<IManagementRule> BuildRules(AIConfig config, ExpiryRegimeProvider? expiryRegimes = null, TrailingStopStore? trailingStops = null, Func<OpenPosition, bool>? brokerProtected = null)
 	{
 		var debug = string.Equals(config.LogLevel, "debug", StringComparison.OrdinalIgnoreCase);
-		var normalizedPricing = SuggestionPricing.Normalize(pricingMode);
 		return new IManagementRule[]
 		{
 			new StopLossRule(config.Rules.StopLoss, config.Opener.RealizedExpectancy, config.Opener.MinEntryToNoiseRatio),
@@ -136,7 +135,7 @@ internal sealed class RuleEvaluator
 			// belongs at the same top tier rather than gated behind the roll/take-profit rules below.
 			new TimeStopRule(config.Rules.TimeStop),
 			new TrailingStopRule(config.Rules.TrailingStop, trailingStops ?? new TrailingStopStore(), brokerProtected),
-			// CloseBeforeShortExpiry runs ahead of OpportunisticRoll/RollShortOnExpiry so a position
+			// CloseBeforeShortExpiry runs ahead of RollShortOnExpiry so a position
 			// scheduled for unwind on expiry day takes the close path instead of getting rolled forward.
 			// BreakEvenGuard (priority 2, B < C) ahead of CloseBeforeShortExpiry: an any-day proximity close
 			// pre-empts the expiry-day emergency, which only fires a buffer past the band.
@@ -152,7 +151,6 @@ internal sealed class RuleEvaluator
 			// that path rather than gaining a second side. Disjoint from LegInShort (single-leg longs) — it
 			// only fires on held 2-leg short verticals.
 			new CompleteCondorRule(config.Rules.CompleteCondor),
-			new OpportunisticRollRule(config.Rules.OpportunisticRoll, config.Indicators, config.Opener.RealizedExpectancy, debug, normalizedPricing),
 			new TakeProfitRule(config.Rules.TakeProfit, debug, config.Opener.MinEntryToNoiseRatio),
 			new DefensiveRollRule(config.Rules.DefensiveRoll, config.Indicators),
 			new RollShortOnExpiryRule(config.Rules.RollShortOnExpiry)

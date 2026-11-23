@@ -100,7 +100,7 @@ internal sealed class ProposalSink
 			var analyzeArg = string.Join(",", p.Legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}@{SuggestionPricing.AnalyzeKeywordFor(l, _suggestPricing)}"));
 
 			// 4-leg reset (close existing + open new): split into close-half and open-half combos — Webull
-			// rejects 4-leg orders that aren't iron condor/butterfly. ScenarioEngine.EmitReset emits legs
+			// rejects 4-leg orders that aren't iron condor/butterfly. Reset proposals emit legs
 			// in close-first/open-second order, so slice by position.
 			var canSplitReset = p.Kind == ProposalKind.Roll
 				&& p.Legs.Count == 4

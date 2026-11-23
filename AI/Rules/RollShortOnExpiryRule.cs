@@ -30,7 +30,7 @@ internal sealed class RollShortOnExpiryRule : IManagementRule
 		if (oldMid > _config.MaxShortPremium) return null;
 
 		// Same strike, next weekly.
-		var newExpiry = NextWeekly(shortLeg.Expiry.Value);
+		var newExpiry = MarketCalendar.NextFridayAfter(shortLeg.Expiry.Value);
 		var newSymbol = MatchKeys.OccSymbol(position.Ticker, newExpiry, shortLeg.Strike, shortLeg.CallPut!);
 
 		if (!ctx.Quotes.TryGetValue(newSymbol, out var newQ) || newQ.Bid == null || newQ.Ask == null) return null;
@@ -57,10 +57,4 @@ internal sealed class RollShortOnExpiryRule : IManagementRule
 		);
 	}
 
-	private static DateTime NextWeekly(DateTime from)
-	{
-		var d = from.AddDays(1);
-		while (d.DayOfWeek != DayOfWeek.Friday) d = d.AddDays(1);
-		return d;
-	}
 }

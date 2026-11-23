@@ -5,8 +5,8 @@ namespace WebullAnalytics.AI;
 
 /// <summary>
 /// Shared quote-fetch pipeline for AI subcommands. Two-phase fetch: first grabs quotes for current
-/// position legs (to learn spot), then enumerates hypothetical-scenario symbols and fetches any
-/// missing quotes so the OpportunisticRollRule can score bracket-strike and next-weekly variants.
+/// position legs (to learn spot), then fetches any missing quotes for the contracts the management
+/// rules may price (<see cref="ManagementQuotePrefetch"/>) and the parity spot guard's probes.
 /// </summary>
 internal static class AIPipelineHelper
 {
@@ -30,19 +30,19 @@ internal static class AIPipelineHelper
 			if (!phase1.Underlyings.TryGetValue(pos.Ticker, out var spot) || spot <= 0m) continue;
 
 			// Convert to LegInfo and classify.
-			var legInfos = new List<ScenarioEngine.LegInfo>();
+			var legInfos = new List<ManagementQuotePrefetch.LegInfo>();
 			var bail = false;
 			foreach (var leg in pos.Legs)
 			{
 				if (leg.CallPut == null || !leg.Expiry.HasValue) { bail = true; break; }
 				var parsed = new OptionParsed(pos.Ticker, leg.Expiry.Value, leg.CallPut, leg.Strike);
-				legInfos.Add(new ScenarioEngine.LegInfo(leg.Symbol, IsLong: leg.Side == Side.Buy, Qty: leg.Qty, parsed));
+				legInfos.Add(new ManagementQuotePrefetch.LegInfo(leg.Symbol, IsLong: leg.Side == Side.Buy, Qty: leg.Qty, parsed));
 			}
 			if (bail) continue;
 
-			var kind = ScenarioEngine.Classify(legInfos);
+			var kind = ManagementQuotePrefetch.Classify(legInfos);
 			var strikeStep = config.Indicators.StrikeStep;
-			foreach (var sym in ScenarioEngine.EnumerateHypotheticalSymbols(legInfos, kind, spot, strikeStep, asOf))
+			foreach (var sym in ManagementQuotePrefetch.EnumerateHypotheticalSymbols(legInfos, kind, spot, strikeStep, asOf))
 			{
 				if (!phase1.Options.ContainsKey(sym)) phase2Symbols.Add(sym);
 			}

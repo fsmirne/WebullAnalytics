@@ -52,7 +52,7 @@ internal sealed record EvaluationContext(
 /// <param name="AdjustedNetDebit">Break-even adjusted debit accounting for roll history.</param>
 /// <param name="Quantity">Number of contracts.</param>
 /// <param name="OpenedAt">Timestamp the position was first opened (null when the source can't determine it).
-/// Used by OpportunisticRollRule's min-hold-days check; null disables that gate.</param>
+/// The backtest uses it to tell a position opened today from one carried in; null when unknown.</param>
 /// <param name="MaxLossPerShare">Worst-case loss per share at expiry — wing width minus net credit for
 /// credit structures, net debit for debit structures. Used by StopLossRule (and others) to fire at the
 /// same threshold the opener's scorer assumed. Null when the source can't derive it (e.g., naked single
