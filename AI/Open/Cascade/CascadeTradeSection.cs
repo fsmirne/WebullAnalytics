@@ -14,8 +14,9 @@ namespace WebullAnalytics.AI.Open.Cascade;
 /// </summary>
 internal static class CascadeTradeSection
 {
-	/// <summary>A proposal and the setup label shown with it (e.g. "BULL TRAP 76/100").</summary>
-	internal sealed record Trade(OpenProposal Proposal, string Label);
+	/// <summary>A proposal and the setup label shown with it (e.g. "BULL TRAP 76/100"). <paramref name="HeldBack"/> is the entry condition the reading
+	/// failed when the trade is only a what-if: shown, never proposed or placed.</summary>
+	internal sealed record Trade(OpenProposal Proposal, string Label, string? HeldBack = null);
 
 	/// <summary>A setup's (or neutral side's) latest ledger entry of the day in this mode; null when it has none. <paramref name="RetryUntil"/>
 	/// is the ET time-of-day a confirmation not yet placed is proposed again until; null once that window has passed, or for a final entry.</summary>
@@ -32,7 +33,7 @@ internal static class CascadeTradeSection
 			AddTrade(rows, trade);
 		}
 		if (rows.Count == 0) rows.Add(new Markup("[dim]no setup enabled[/]"));
-		var title = trades.Any(t => t.Proposal.Qty >= 1) ? $"TRADE · TODAY ({(live ? "live" : "dry run")})" : $"TODAY ({(live ? "live" : "dry run")})";
+		var title = trades.Any(t => t.Proposal.Qty >= 1 && t.HeldBack == null) ? $"TRADE · TODAY ({(live ? "live" : "dry run")})" : $"TODAY ({(live ? "live" : "dry run")})";
 		return CascadePanel.SubPanel(title, new Rows(rows));
 	}
 
@@ -41,20 +42,23 @@ internal static class CascadeTradeSection
 		var p = trade.Proposal;
 		var perShare = p.DebitOrCreditPerContract / 100m;
 		var cash = perShare >= 0m ? $"credit ${perShare:F2}" : $"debit ${-perShare:F2}";
-		var placeable = p.Qty >= 1;
-		var marker = placeable ? $"[bold green]▶ {Markup.Escape(trade.Label)}[/]" : $"[bold yellow]▷ {Markup.Escape(trade.Label)}[/]";
-		var size = placeable ? $" x{p.Qty}" : "";
+		var sized = p.Qty >= 1;
+		var heldBack = trade.HeldBack != null;
+		var marker = heldBack ? $"[bold aqua]◇ {Markup.Escape(trade.Label)} · what if[/]"
+			: sized ? $"[bold green]▶ {Markup.Escape(trade.Label)}[/]" : $"[bold yellow]▷ {Markup.Escape(trade.Label)}[/]";
+		var size = sized ? $" x{p.Qty}" : "";
 		rows.Add(new Markup($"{marker} · [bold]{p.StructureKind}[/] {Markup.Escape(p.Ticker)}{size} · {cash} · max loss ${-p.MaxLossPerContract:N0} per contract"));
 		// The sizing caps zeroed it: its legs are the unscaled one-lot skeleton, so they are shown per contract and nothing is placed.
-		rows.Add(new Markup(placeable ? Markup.Escape(p.Legs.Describe()) : $"[dim]per contract:[/] {Markup.Escape(p.Legs.Describe())}"));
+		rows.Add(new Markup(sized ? Markup.Escape(p.Legs.Describe()) : $"[dim]per contract:[/] {Markup.Escape(p.Legs.Describe())}"));
 		if (!string.IsNullOrWhiteSpace(p.PricingWarning)) rows.Add(new Markup($"[yellow]{Markup.Escape(p.PricingWarning)}[/]"));
-		if (!placeable)
+		if (heldBack) rows.Add(new Markup($"[yellow]held back: {Markup.Escape(trade.HeldBack!)} — not proposed, nothing recorded[/]"));
+		if (!sized)
 		{
-			rows.Add(new Markup($"[yellow]not placed: sized to 0 contracts — {Markup.Escape(p.CashReserveDetail ?? "the sizing caps allow none")}[/]"));
-			return;
+			rows.Add(new Markup($"[yellow]{(heldBack ? "would size" : "not placed: sized")} to 0 contracts — {Markup.Escape(p.CashReserveDetail ?? "the sizing caps allow none")}[/]"));
+			if (!heldBack) return;
 		}
 		var leadIn = WebullAnalytics.IO.TextFileExporter.ReproductionLeadIn(false);
-		foreach (var line in ReproductionCommands.Build(p, SuggestionPricing.Mid, includeRisk: true))
+		foreach (var line in ReproductionCommands.Build(p, SuggestionPricing.Mid, includeRisk: true, emitPlace: !heldBack))
 			rows.Add(new Markup($"[dim]{leadIn} {Markup.Escape(line)}[/]"));
 	}
 

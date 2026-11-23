@@ -596,6 +596,24 @@ public class CascadeOpenerTests
 	}
 
 	[Fact]
+	public async Task ATradeAnEntryConditionHeldBackIsShownAsAWhatIfWithoutAnOrderLine()
+	{
+		var read = Read(CascadeRegime.BullTrap);
+		var opener = new CascadeOpener(Config(), live: false, new CascadeSignalLedger(), (_, _) => Task.FromResult<(CascadeLiveRead? Read, string? Error)>((read, null)), quiet: true, toEt: et => et);
+		var p = Assert.Single(await opener.EvaluateAsync(Ctx() with { Now = Today.AddHours(10).AddMinutes(40) }, TestContext.Current.CancellationToken));
+
+		var text = Render(CascadeTradeSection.Build([new CascadeTradeSection.Trade(p, "BULL TRAP 76/100", HeldBack: "VIX 27.60 > maxVix 25.00")], [], [], live: false));
+
+		Assert.Contains("TODAY (dry run)", text);
+		Assert.DoesNotContain("TRADE", text);
+		Assert.Contains($"◇ BULL TRAP 76/100 · what if · ShortCallVertical SPXW x{p.Qty} · credit $", text);
+		Assert.Contains("held back: VIX 27.60 > maxVix 25.00 — not proposed, nothing recorded", text);
+		Assert.DoesNotContain("wa trade place", text);
+		Assert.Contains($"wa analyze trade \"sell:{Occ(7550m)}:{p.Qty}@MID,buy:{Occ(7560m)}:{p.Qty}@MID\"", text);
+		Assert.Contains($"wa analyze risk \"sell:{Occ(7550m)}:{p.Qty},buy:{Occ(7560m)}:{p.Qty}\"", text);
+	}
+
+	[Fact]
 	public async Task ATradeSizedToZeroIsShownAsNotPlacedAndTheDayRecordsWhy()
 	{
 		// 2026-11-16 10:02: a LongPut at $1,810 a contract against a $1,802 risk budget. The executor skips a zero-sized proposal, so the

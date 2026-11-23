@@ -125,7 +125,7 @@ internal sealed class CascadeOpener
 
 		// The reading, what it is opening and the day so far, in one panel.
 		if (!_quiet) CascadePanel.Render(ticker, nowEt, $"{read.ExpiryCount} expiration(s) ≤{CascadeScreener.DefaultDte}DTE", reading, showLegend: false, trade: CascadeTradeSection.Build(trades, notices, Today(today, ticker, nowEt), _live));
-		return trades.Select(t => t.Proposal).ToList();
+		return trades.Where(t => t.HeldBack == null).Select(t => t.Proposal).ToList();
 	}
 
 	/// <summary>What became of each enabled setup (and neutral side) today in this mode, from the ledger: one row each, in config order.</summary>
@@ -199,11 +199,12 @@ internal sealed class CascadeOpener
 		var score = setupScore ?? reading.LeadingSetup.Score;
 		var label = side != null ? $"{CascadeReading.RegimeLabel(setup)} {side}" : leanScore is int lean ? $"{CascadeReading.RegimeLabel(setup)} (lean {lean})" : CascadeReading.RegimeLabel(setup);
 		// Entry conditions (VIX, score) are checked before the ledger: a reading that fails one is not this setup's entry, so a later reading
-		// of the day that passes may still be.
-		if (trade.EntryConditionFailure(reading, score) is string gated)
+		// of the day that passes may still be. On screen it still shows the trade it would have opened, held back.
+		var gated = trade.EntryConditionFailure(reading, score);
+		if (gated != null)
 		{
 			GatedReadings.Add((setup, gated));
-			return;
+			if (_quiet) return;
 		}
 		var today = DateOnly.FromDateTime(nowEt);
 		// Done for the day once an entry is final (acted on, or a first confirmation with no trade) or the retry window has passed.
@@ -215,6 +216,14 @@ internal sealed class CascadeOpener
 		var (skeleton, skip) = BuildTrade(ticker, nowEt.Date, read.Spot, reading.Terrain, read.Quotes, _config.Indicators.StrikeStep, trade, reading.Inputs.Tape);
 		var proposal = skeleton == null ? null : Propose(skeleton, read, ctx);
 		if (skeleton != null && proposal == null) skip = "the scorer could not price the legs";
+
+		// Held back by an entry condition: shown as a what-if only — nothing proposed, nothing recorded.
+		if (gated != null)
+		{
+			if (proposal == null) notices.Add($"[yellow]{Markup.Escape(label)}: held back[/] — {Markup.Escape(gated)}. What if: no trade — {Markup.Escape(skip!)}.");
+			else trades.Add(new CascadeTradeSection.Trade(proposal with { Spot = read.Spot }, $"{label} {score}/100", HeldBack: gated));
+			return;
+		}
 
 		var entry = new CascadeSignalLedger.Entry(today.ToString("yyyy-MM-dd"), ticker, setup, nowEt.ToString("HH:mm:ss"), _live, score, read.Spot, CascadeSignalLedger.Signaled, proposal?.Legs.Describe() ?? skip!, side);
 		// The trade as proposed: what it is, its size and the price it was proposed at. A trade the sizing caps zero out keeps the unscaled

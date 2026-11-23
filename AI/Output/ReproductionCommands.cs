@@ -55,20 +55,12 @@ internal static class ReproductionCommands
 	/// per-share prices (the debug "exactly what the scorer saw, replayable offline" path) instead of the
 	/// MID/BID/ASK placeholder keywords the live panel uses (which re-fetch the current market on run).</param>
 	/// <param name="includeRisk">Append a <c>wa analyze risk</c> line (live quotes) after the analyze line.</param>
-	public static IReadOnlyList<string> Build(OpenProposal p, string suggestPricing, bool explicitAnalyzePrices = false, bool includeRisk = false)
+	/// <param name="emitPlace">False leaves out the <c>wa trade place</c> line(s): a what-if that is not to be placed.</param>
+	public static IReadOnlyList<string> Build(OpenProposal p, string suggestPricing, bool explicitAnalyzePrices = false, bool includeRisk = false, bool emitPlace = true)
 	{
 		var lines = new List<string>();
 
-		var groups = StructureOrderSplit.Split(p.StructureKind, p.Legs);
-		if (groups.Count > 1)
-		{
-			foreach (var g in groups)
-				lines.Add(SignedPlaceLine(g.Legs, SuggestionPricing.TryGetSignedNetPerShare(g.Legs, suggestPricing) ?? 0m, $"  # {g.Label}"));
-		}
-		else
-		{
-			lines.Add(SignedPlaceLine(p.Legs, SuggestionPricing.TryGetSignedNetPerShare(p.Legs, suggestPricing) ?? p.DebitOrCreditPerContract / 100m));
-		}
+		if (emitPlace) lines.AddRange(PlaceLines(p, suggestPricing));
 
 		lines.Add(AnalyzeLine(p.Legs, l => explicitAnalyzePrices && l.PricePerShare.HasValue
 			? l.PricePerShare.Value.ToString("F2", CultureInfo.InvariantCulture)
@@ -76,5 +68,14 @@ internal static class ReproductionCommands
 		if (includeRisk) lines.Add(RiskLine(p.Legs));
 
 		return lines;
+	}
+
+	/// <summary>The <c>wa trade place</c> line(s) for <paramref name="p"/>: one per order its structure splits into.</summary>
+	private static IEnumerable<string> PlaceLines(OpenProposal p, string suggestPricing)
+	{
+		var groups = StructureOrderSplit.Split(p.StructureKind, p.Legs);
+		if (groups.Count > 1)
+			return groups.Select(g => SignedPlaceLine(g.Legs, SuggestionPricing.TryGetSignedNetPerShare(g.Legs, suggestPricing) ?? 0m, $"  # {g.Label}"));
+		return new[] { SignedPlaceLine(p.Legs, SuggestionPricing.TryGetSignedNetPerShare(p.Legs, suggestPricing) ?? p.DebitOrCreditPerContract / 100m) };
 	}
 }
