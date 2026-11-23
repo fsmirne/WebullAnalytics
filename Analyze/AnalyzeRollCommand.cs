@@ -221,6 +221,29 @@ internal static class RollCandidateEnumerator
 		int expN,
 		DateTime today)
 	{
+		var candidates = new List<RollCandidate>();
+		var skippedIlliquid = 0;
+		foreach (var (sym, parsed, quote, isSnapped) in Window(quotes, oldLeg, anchor, strikesN, expN, today))
+		{
+			if (string.Equals(sym, oldSymbol, StringComparison.OrdinalIgnoreCase)) continue;
+			if (!IsLiquidEnough(quote, rolledAction))
+			{
+				skippedIlliquid++;
+				continue;
+			}
+			var isAnchor = anchorSymbol != null && string.Equals(sym, anchorSymbol, StringComparison.OrdinalIgnoreCase);
+			candidates.Add(new RollCandidate(sym, parsed, quote, isAnchor, isSnapped));
+		}
+		return (candidates, skippedIlliquid);
+	}
+
+	/// <summary>Every listed contract (same right and book as <paramref name="oldLeg"/>, whatever its quote) ±<paramref name="strikesN"/> listed strikes
+	/// and ±<paramref name="expN"/> listed expirations around <paramref name="anchor"/>, expiries clamped at <paramref name="today"/>. IsSnapped marks
+	/// the nearest strike standing in for an anchor strike the expiry doesn't list. A chain that lists contracts as quote-less stubs (Webull past the
+	/// front expiry) still yields them, so a caller can fetch their quotes before <see cref="Enumerate"/> filters them.</summary>
+	internal static IEnumerable<(string Symbol, OptionParsed Parsed, OptionContractQuote Quote, bool IsSnapped)> Window(
+		IReadOnlyDictionary<string, OptionContractQuote> quotes, OptionParsed oldLeg, OptionParsed anchor, int strikesN, int expN, DateTime today)
+	{
 		var byExpiry = new SortedDictionary<DateTime, List<(string Symbol, OptionParsed Parsed, OptionContractQuote Quote)>>();
 		foreach (var (sym, quote) in quotes)
 		{
@@ -237,22 +260,17 @@ internal static class RollCandidateEnumerator
 			}
 			list.Add((sym, parsed, quote));
 		}
-
-		if (byExpiry.Count == 0) return ([], 0);
+		if (byExpiry.Count == 0) yield break;
 
 		var expiries = byExpiry.Keys.ToList();
 		var anchorExpIdx = FindNearestIndex(expiries, anchor.ExpiryDate.Date, (a, b) => Math.Abs((a - b).TotalDays));
 		var minExpIdx = Math.Max(0, anchorExpIdx - expN);
 		var maxExpIdx = Math.Min(expiries.Count - 1, anchorExpIdx + expN);
 
-		var candidates = new List<RollCandidate>();
-		var skippedIlliquid = 0;
-
 		for (int ei = minExpIdx; ei <= maxExpIdx; ei++)
 		{
-			var contracts = byExpiry[expiries[ei]];
 			// Deduplicate same strike at the same expiry (prefer exact root match, e.g. SPXW vs SPX)
-			var byStrike = contracts
+			var byStrike = byExpiry[expiries[ei]]
 				.GroupBy(c => c.Parsed.Strike)
 				.OrderBy(g => g.Key)
 				.Select(g => g.OrderByDescending(c => string.Equals(c.Parsed.Root, anchor.Root, StringComparison.OrdinalIgnoreCase)).First())
@@ -263,25 +281,9 @@ internal static class RollCandidateEnumerator
 			var anchorStrikeExists = byStrike[anchorStrikeIdx].Parsed.Strike == anchor.Strike;
 			var minStrikeIdx = Math.Max(0, anchorStrikeIdx - strikesN);
 			var maxStrikeIdx = Math.Min(byStrike.Count - 1, anchorStrikeIdx + strikesN);
-
 			for (int si = minStrikeIdx; si <= maxStrikeIdx; si++)
-			{
-				var (sym, parsed, quote) = byStrike[si];
-				if (string.Equals(sym, oldSymbol, StringComparison.OrdinalIgnoreCase)) continue;
-
-				if (!IsLiquidEnough(quote, rolledAction))
-				{
-					skippedIlliquid++;
-					continue;
-				}
-
-				var isAnchor = anchorSymbol != null && string.Equals(sym, anchorSymbol, StringComparison.OrdinalIgnoreCase);
-				var isSnapped = !anchorStrikeExists && si == anchorStrikeIdx;
-				candidates.Add(new RollCandidate(sym, parsed, quote, isAnchor, isSnapped));
-			}
+				yield return (byStrike[si].Symbol, byStrike[si].Parsed, byStrike[si].Quote, !anchorStrikeExists && si == anchorStrikeIdx);
 		}
-
-		return (candidates, skippedIlliquid);
 	}
 
 	/// <summary>A candidate is usable when it has a two-sided quote (bid and ask), the execution side is non-zero,

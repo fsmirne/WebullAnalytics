@@ -344,7 +344,7 @@ The command appends a machine-readable record to `data/analyze-risk.jsonl` after
 Loads an existing open option strategy from `data/orders.jsonl` (or a stored `--proposal`, a recent `--fill [N]`, or a manual `<spec>`), then ranks hold/roll/reset scenarios with projected P&L and buying-power impact.
 
 ```
-wa analyze position ["<spec>"] [--proposal <FILE[:LINE]>] [--fill [N]] [--iv-default <pct>] [--strike-step <step>] [--cash <amount>] [--risk <value>] [--account <alias>] [--calibrated [true|false]] [--theoretical] [--date <when>] [--log-level <level>] [report options]
+wa analyze position ["<spec>"] [--proposal <FILE[:LINE]>] [--fill [N]] [--iv-default <pct>] [--strike-step <step>] [--cash <amount>] [--risk <value>] [--account <alias>] [--calibrated [true|false]] [--theoretical] [--date <when>] [--log-level <level>] [--sell <OCC> [--strikes <N>] [--exp <N>]] [report options]
 ```
 
 If `<spec>` is omitted, the command scans open strategy positions from the trade log and lets you pick one interactively.
@@ -368,6 +368,9 @@ wa analyze position "sell:GME260424C00025000:499@0.48,buy:GME260515C00025000:499
 
 # Analyze a single long call with a custom scenario strike step
 wa analyze position "buy:GME260620C00025000:10@1.25" --strike-step 0.50 --spot GME:24.88
+
+# A single long: every conversion ±2 strikes × ±2 expiries around selling the 11-27 727C against it
+wa analyze position --sell SPY261127C00727000 --strikes 2 --exp 2
 ```
 
 The command prints a compact **Scenario Comparison** summary table (`Cash Δ`, `BP Δ`, `Break-evens`, `POP`, `EV (Total)`, `P&L (Pinned)`), followed by detailed scenario cards with ready-to-run `wa trade place` and `wa analyze trade` reproduction commands, and appends a machine-readable record to `data/analyze-position.jsonl`. For calendars and diagonals on a live chain:
@@ -377,6 +380,8 @@ The command prints a compact **Scenario Comparison** summary table (`Cash Δ`, `
 - **Pure EV ranking by default:** `--risk` defaults to `0` (pure EV); pass a positive value (e.g. `--risk 0.5`) to penalize scenarios by newly deployed margin/cash.
 
 For a single long call or put on a live chain, the scenarios besides `Hold to expiry` and `Close now` are **conversions**: sell one short against the long, keeping it, to make a `vertical` (the long's expiry), `calendar` (the long's strike, an earlier expiry) or `covered diagonal`; a short on the long's in-the-money side is labeled `inverted` and carries the strike width as margin. The sweep covers `±5` strikes around spot at the 8 front expiries and at the long's own expiry, plus the long's strike at the front expiries, never a short expiring after the long. Each conversion is valued at the short's expiry and shortlisted like the spread rolls (ranked on the opener scorer when `ai-config` is present). A vertical's card states the floor it locks, credit − cost basis (less the width when inverted): `≥ 0` means the converted position can no longer lose. Its `wa analyze trade` command shows the long and the short as one structure. Without a live chain (`--theoretical`, a past `--date`) the only conversion is the same-strike next-weekly calendar.
+
+**`--sell <OCC>` sweep** (single long, live chain): instead of the default conversion windows, every listed short ±`--strikes` strikes and ±`--exp` expiries around the given contract — the same window `analyze roll --to` sweeps, never expiring after the long — is valued like the default conversions and shown, with no shortlist. `--strikes` / `--exp` default to 2 and are prompted in an interactive terminal when omitted. Above the scenario table, a **Conversion EV by short strike × expiry** grid shows each conversion's total EV (the table's `EV (Total)`) by the short's strike (rows) and expiry (columns): `pN` marks a partial on the N contracts the cash funds, `◆` the `--sell` contract, the best EV is bold, and `Hold to expiry` / `Close now` are given for reference.
 
 #### `analyze gex`
 

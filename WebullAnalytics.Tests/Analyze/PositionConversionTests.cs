@@ -111,4 +111,41 @@ public class PositionConversionTests
 	[InlineData("P", 660, 2.00, -13.00)]
 	public void VerticalFloorIsCreditLessBasisLessAnInvertedWidth(string callPut, int shortStrike, decimal credit, decimal expected) =>
 		Assert.Equal(expected, AnalyzePositionCommand.VerticalFloorPerShare(new OptionParsed("SPY", LongExp, callPut, shortStrike), new OptionParsed("SPY", LongExp, callPut, 680m), credit, 15m));
+
+	[Fact]
+	public void SellSweep_ValuesEveryShortInTheWindow_NoShortlist_NeverPastTheLong()
+	{
+		// ±1 strike around 700, ±2 listed expiries around 12-11: 12-02 / 12-04 / 12-11 / 12-18 / 01-15, the last outliving the long.
+		var settings = new AnalyzePositionSettings { IvDefault = 20m, StrikeStep = 1m, Sell = Sym(new DateTime(2026, 12, 11), 700m), Strikes = 1, Exp = 2 };
+		var scenarios = AnalyzePositionCommand.GenerateScenarios([Long680()], AnalyzePositionCommand.StructureKind.SingleLong, settings, Spot, AsOf, Chain(), shortlistSwept: true)
+			.Where(s => s.Name.StartsWith("Convert to ", StringComparison.Ordinal)).ToList();
+
+		var shorts = scenarios.Select(s => s.Book![0].Legs.Single(l => l.Action == LegAction.Sell).Parsed).ToList();
+		Assert.Equal(4 * 3, shorts.Count);                                                       // 4 expiries × 3 strikes, every one kept
+		Assert.Equal([new(2026, 12, 2), new(2026, 12, 4), new(2026, 12, 11), LongExp], shorts.Select(p => p.ExpiryDate).Distinct().Order());
+		Assert.Equal([699m, 700m, 701m], shorts.Select(p => p.Strike).Distinct().Order());
+	}
+
+	[Fact]
+	public void Window_YieldsListedStubs_SoTheyCanBeQuotedBeforeEnumerateFiltersThem()
+	{
+		var quotes = Chain();
+		var stub = Sym(new DateTime(2026, 12, 4), 700m);
+		quotes[stub] = new OptionContractQuote(stub, null, null, null, null, null, null, null, null);   // Webull past the front expiry: listed, unquoted
+		var anchor = Call(new DateTime(2026, 12, 4), 700m);
+
+		Assert.Contains(stub, RollCandidateEnumerator.Window(quotes, Long680().Parsed, anchor, 0, 0, AsOf).Select(c => c.Symbol));
+		Assert.DoesNotContain(RollCandidateEnumerator.Enumerate(quotes, Long680().Parsed, Long680().Symbol, anchor, null, LegAction.Sell, 0, 0, AsOf).Candidates, c => c.Symbol == stub);
+	}
+
+	[Theory]
+	[InlineData(null, 2, null, "--strikes / --exp size the --sell sweep")]
+	[InlineData("NOTANOCC", null, null, "not an OCC option symbol")]
+	[InlineData("SPY261211C00700000", -1, null, "must be ≥ 0")]
+	public void SellSweep_Validation(string? sell, int? strikes, int? exp, string error)
+	{
+		var result = new AnalyzePositionSettings { Sell = sell, Strikes = strikes, Exp = exp }.Validate();
+		Assert.False(result.Successful);
+		Assert.Contains(error, result.Message);
+	}
 }
