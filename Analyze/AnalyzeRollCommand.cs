@@ -1051,7 +1051,7 @@ internal sealed class AnalyzeRollCommand : AsyncCommand<AnalyzeRollSettings>
 		}
 
 		var spot = ParsingHelpers.TryResolveForRoot(underlyingPrices, ticker, out var sp) ? sp : 0m;
-		var spotOverrides = await AnalyzeCommon.ResolveSpotOverrideMapAsync(settings.Spot, settings.Extended, [ticker], settings.ResolvedVendor, underlyingPrices, cancellation);
+		var spotOverrides = await AnalyzeCommon.ResolveSpotOverrideMapAsync(settings.Spot, settings.SpotSession, [ticker], settings.ResolvedVendor, underlyingPrices, cancellation);
 		decimal ovr = 0m;
 		var hasSpotOverride = spotOverrides != null && ParsingHelpers.TryResolveForRoot(spotOverrides, ticker, out ovr);
 		if (hasSpotOverride) spot = ovr;

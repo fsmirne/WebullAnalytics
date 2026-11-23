@@ -82,7 +82,7 @@ internal sealed class AnalyzeCascadeCommand : AsyncCommand<AnalyzeCascadeSetting
 		var nowEt = MarketTime.NowEt();
 		if (settings.PinnedInstant is not DateTime asOfEt)
 		{
-			var ovMap = await AnalyzeCommon.ResolveSpotOverrideMapAsync(settings.Spot, settings.Extended, [ticker], settings.ResolvedVendor, rthSpots: null, cancellation);
+			var ovMap = await AnalyzeCommon.ResolveSpotOverrideMapAsync(settings.Spot, settings.SpotSession, [ticker], settings.ResolvedVendor, rthSpots: null, cancellation);
 			var spotOverride = ovMap != null && ParsingHelpers.TryResolveForRoot(ovMap, ticker, out var ov) ? ov : (decimal?)null;
 			var (live, error) = await CascadeLiveReader.ReadAsync(new CascadeLiveReader.Request(ticker, settings.VendorName, settings.Dte, settings.StrikeRangePct, settings.MaxStrikes, settings.TriggerScore, spotOverride), nowEt, cancellation);
 			if (live == null)

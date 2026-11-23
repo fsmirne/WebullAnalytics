@@ -68,6 +68,14 @@ class GridSettings : CommandSettings
 	[DefaultValue(false)]
 	public bool Extended { get; set; }
 
+	[Description("Project positions at the latest overnight-session (20:00–04:00 ET) underlying price from Webull's tape (SPY-scaled for the SPX family) while keeping IV calibration and market-basis anchoring at the regular-session close. In-memory only; a ticker with no overnight print keeps its regular spot. Explicit --spot entries win per ticker.")]
+	[CommandOption("--overnight")]
+	[DefaultValue(false)]
+	public bool Overnight { get; set; }
+
+	/// <summary>The live session --extended / --overnight select (validated mutually exclusive).</summary>
+	internal SpotSession SpotSession => SpotSessionOptions.From(Extended, Overnight).Session;
+
 	[Description("Use Black-Scholes theoretical price instead of market mid for today's option value in the time-decay grid")]
 	[CommandOption("--theoretical")]
 	[DefaultValue(false)]
@@ -111,7 +119,9 @@ class GridSettings : CommandSettings
 
 	public override ValidationResult Validate()
 	{
-		if (AsOf.Validate(Date, FillAllowed, Spot, Extended) is { } dateError)
+		if (SpotSessionOptions.From(Extended, Overnight).Error is { } sessionError)
+			return ValidationResult.Error(sessionError);
+		if (AsOf.Validate(Date, FillAllowed, Spot, SpotSession) is { } dateError)
 			return ValidationResult.Error(dateError);
 
 		if (Vendor != null && Vendor.Trim().ToLowerInvariant() is not ("webull" or "schwab"))
@@ -465,7 +475,7 @@ class ReportCommand : AsyncCommand<ReportSettings>
 
 		var targetTickers = (IEnumerable<string>?)underlyingPrices?.Keys
 			?? positionRows.Where(r => r.MatchKey != null).Select(r => MatchKeys.GetTicker(r.MatchKey!)).Where(t => !string.IsNullOrEmpty(t)).Select(t => t!);
-		IReadOnlyDictionary<string, decimal>? underlyingPriceOverrides = await AnalyzeCommon.ResolveSpotOverrideMapAsync(settings.Spot, settings.Extended, targetTickers, vendor, underlyingPrices, cancellation);
+		IReadOnlyDictionary<string, decimal>? underlyingPriceOverrides = await AnalyzeCommon.ResolveSpotOverrideMapAsync(settings.Spot, settings.SpotSession, targetTickers, vendor, underlyingPrices, cancellation);
 
 		IReadOnlyDictionary<string, List<decimal>>? extraLevels = null;
 		if (settings.Levels != null)

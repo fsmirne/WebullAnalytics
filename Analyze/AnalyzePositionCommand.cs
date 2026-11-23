@@ -218,7 +218,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			}
 		}
 
-		var spotOverrides = await AnalyzeCommon.ResolveSpotOverrideMapAsync(settings.Spot, settings.Extended, [ticker], settings.ResolvedVendor, underlyingPrices, cancellation);
+		var spotOverrides = await AnalyzeCommon.ResolveSpotOverrideMapAsync(settings.Spot, settings.SpotSession, [ticker], settings.ResolvedVendor, underlyingPrices, cancellation);
 		decimal ovSpot = 0m;
 		var hasSpotOverride = spotOverrides != null && ParsingHelpers.TryResolveForRoot(spotOverrides, ticker, out ovSpot);
 		var spot = hasSpotOverride ? ovSpot
@@ -2521,7 +2521,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 		var extras = new List<string>();
 		if (!string.IsNullOrEmpty(settings.Spot)) extras.Add($"--spot {settings.Spot}");
-		else if (settings.Extended) extras.Add("--extended");
+		else if (settings.SpotSession.Flag() is { } sessionFlag) extras.Add(sessionFlag);
 		if (!string.IsNullOrEmpty(settings.Date)) extras.Add($"--date {settings.Date}");
 		var suffix = extras.Count > 0 ? " " + string.Join(" ", extras) : "";
 

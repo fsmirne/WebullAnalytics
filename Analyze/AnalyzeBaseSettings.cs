@@ -33,6 +33,14 @@ internal abstract class AnalyzeBaseSettings : CommandSettings
 	[Description("Project at the latest extended-hours (pre/post-market) underlying spot while keeping IV calibration at the regular-session close. Explicit --spot entries win per ticker.")]
 	public bool Extended { get; set; }
 
+	[CommandOption("--overnight")]
+	[DefaultValue(false)]
+	[Description("Project at the latest overnight-session (20:00–04:00 ET) underlying price from Webull's tape (SPY-scaled for the SPX family) while keeping IV calibration at the regular-session close. In-memory only; a ticker with no overnight print keeps its regular spot. Explicit --spot entries win per ticker.")]
+	public bool Overnight { get; set; }
+
+	/// <summary>The live session --extended / --overnight select (validated mutually exclusive).</summary>
+	internal SpotSession SpotSession => SpotSessionOptions.From(Extended, Overnight).Session;
+
 	[CommandOption("--vendor <VENDOR>")]
 	[Description("Live option-chain quote vendor: 'webull' (sniffed-session chain) or 'schwab' (chains-API NBBO; needs `wa schwab login`). When omitted, the top-level `vendor` in config.json applies (default webull). Overrides it for this run.")]
 	public string? Vendor { get; set; }
@@ -80,7 +88,9 @@ internal abstract class AnalyzeBaseSettings : CommandSettings
 
 	public override ValidationResult Validate()
 	{
-		if (AsOf.Validate(Date, FillAllowed, Spot, Extended) is { } dateError)
+		if (SpotSessionOptions.From(Extended, Overnight).Error is { } sessionError)
+			return ValidationResult.Error(sessionError);
+		if (AsOf.Validate(Date, FillAllowed, Spot, SpotSession) is { } dateError)
 			return ValidationResult.Error(dateError);
 
 		var format = OutputFormat.ToLowerInvariant();

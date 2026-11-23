@@ -338,12 +338,12 @@ internal static class AnalyzeCommon
 		return (quotes, underlyings);
 	}
 
-	/// <summary>Merges explicit <c>--spot</c> entries with <c>--extended</c> extended-hours prices for
-	/// <paramref name="tickers"/>. Explicit <c>--spot</c> entries win per ticker; <c>--extended</c> fills in any
-	/// remaining tickers (no-op at a past <c>--date</c>). Returns null when neither flag yields an override.</summary>
+	/// <summary>Merges explicit <c>--spot</c> entries with the live <paramref name="session"/>'s prices (<c>--extended</c> /
+	/// <c>--overnight</c>) for <paramref name="tickers"/>. Explicit <c>--spot</c> entries win per ticker; the session fills in any
+	/// remaining tickers (no-op at a past <c>--date</c>). Returns null when neither yields an override.</summary>
 	internal static async Task<Dictionary<string, decimal>?> ResolveSpotOverrideMapAsync(
 		string? spotSpec,
-		bool extended,
+		SpotSession session,
 		IEnumerable<string> tickers,
 		QuoteVendor vendor,
 		IReadOnlyDictionary<string, decimal>? rthSpots,
@@ -353,13 +353,18 @@ internal static class AnalyzeCommon
 			? ReportCommand.ParseUnderlyingPriceOverrides(spotSpec)
 			: new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
 
-		if (extended && !EvaluationDate.IsPast)
+		if (session != SpotSession.Regular && !EvaluationDate.IsPast)
 		{
 			var missing = tickers
 				.Where(t => !string.IsNullOrWhiteSpace(t) && !ParsingHelpers.TryResolveForRoot(overrides, t, out _))
 				.Distinct(StringComparer.OrdinalIgnoreCase)
 				.ToList();
-			if (missing.Count > 0)
+			if (missing.Count > 0 && session == SpotSession.Overnight)
+			{
+				foreach (var (t, price) in await ResolveOvernightSpotsAsync(missing, cancellation))
+					overrides[t] = price;
+			}
+			else if (missing.Count > 0)
 			{
 				var extSpots = await ResolveExtendedSpotsAsync(missing, vendor, cancellation, rthSpots);
 				foreach (var (t, price) in extSpots)
@@ -379,6 +384,34 @@ internal static class AnalyzeCommon
 		}
 
 		return overrides.Count > 0 ? overrides : null;
+	}
+
+	/// <summary>Resolves the latest overnight-session (20:00–04:00 ET) price for each ticker from Webull's chart tape, whatever the
+	/// quote vendor (Schwab has no overnight print). A ticker whose latest bar is not an overnight one — the session is closed, or the
+	/// symbol doesn't trade in it — gets no entry and a warning, so it keeps its regular spot rather than a stale post-market price.
+	/// Nothing is cached or written to disk.</summary>
+	private static async Task<Dictionary<string, decimal>> ResolveOvernightSpotsAsync(IReadOnlyList<string> tickers, CancellationToken cancellation)
+	{
+		var result = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+		var apiConfig = AI.OpenCandidateEvaluator.TryLoadApiConfig();
+		if (apiConfig is not { Webull.Headers.Count: > 0 })
+		{
+			AnsiConsole.MarkupLine("[yellow]--overnight: no Webull headers in api-config.json (run 'sniff'); using the regular spot.[/]");
+			return result;
+		}
+
+		foreach (var ticker in tickers.Select(t => t.Trim().ToUpperInvariant()))
+		{
+			var bar = await WebullIntradayBars.FetchLatestOvernightBarAsync(apiConfig, ticker, cancellation);
+			if (bar == null)
+			{
+				AnsiConsole.MarkupLine($"[yellow]--overnight: no overnight-session price for {Markup.Escape(ticker)}; using the regular spot.[/]");
+				continue;
+			}
+			result[ticker] = Math.Round(bar.Close, 2);
+			AnsiConsole.MarkupLine($"[dim]--overnight: {Markup.Escape(ticker)} spot {result[ticker]:0.00} from the {MarketTime.ToEt(bar.Timestamp):ddd HH:mm} ET overnight bar.[/]");
+		}
+		return result;
 	}
 
 	/// <summary>Resolves the latest extended-hours (pre/post-market) spot price for each ticker in <paramref name="tickers"/>.

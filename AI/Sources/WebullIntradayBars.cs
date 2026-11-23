@@ -49,62 +49,84 @@ internal static class WebullIntradayBars
 		return async (ticker, interval, count, includeExtended, cancellation) =>
 		{
 			if (SpxFamilyTickers.Contains(ticker))
-			{
-				return await FetchSpxWithSpyExtendedAsync(apiConfig, ticker, tickerIds, interval, cancellation);
-			}
+				return await FetchSpxWithSpyExtendedAsync(apiConfig, ticker, tickerIds, interval, includeOvernight: false, cancellation);
 
-			if (!tickerIds.TryGetValue(ticker, out var tickerId))
+			var tickerId = await ResolveChartTickerIdAsync(ticker, tickerIds, cancellation);
+			if (tickerId == null)
 			{
-				// Check chart-namespace overrides FIRST. The option-chain endpoint and the chart
-				// endpoint use different tickerId namespaces for cash indexes; ResolveTickerIdsAsync
-				// returns chain-namespace IDs from KnownTickerIds, which produce nonsense data on the
-				// chart endpoint. Tradable securities (SPY, QQQ, etc.) share the same ID across both
-				// endpoints and fall through to the search resolver.
-				if (WebullChartsClient.TryResolveKnownChartTickerId(ticker, out tickerId))
-				{
-					tickerIds.TryAdd(ticker, tickerId);
-				}
-				else
-				{
-					var resolved = await WebullOptionsClient.ResolveTickerIdsAsync(new[] { ticker }, cancellation);
-					if (!resolved.TryGetValue(ticker, out tickerId))
-					{
-						Console.WriteLine($"Webull intraday: could not resolve tickerId for '{ticker}'; intraday signal disabled for this ticker.");
-						return Array.Empty<MinuteBar>();
-					}
-					tickerIds.TryAdd(ticker, tickerId);
-				}
+				Console.WriteLine($"Webull intraday: could not resolve tickerId for '{ticker}'; intraday signal disabled for this ticker.");
+				return Array.Empty<MinuteBar>();
 			}
-
-			return await WebullChartsClient.FetchIntradayBarsAsync(apiConfig, tickerId, interval, count, includeExtended, cancellation);
+			return await WebullChartsClient.FetchIntradayBarsAsync(apiConfig, tickerId.Value, interval, count, includeExtended, cancellation);
 		};
 	}
 
-	/// <summary>Fetches SPX RTH bars and SPY extended-hours bars in parallel and splices them via
-	/// <see cref="SpxFamilyTape.Merge"/> (SPX wins on overlap, SPY scaled into index units, volume 0). Falls
-	/// back to SPX-only on SPY resolution failure or insufficient data to compute the ratio.</summary>
+	/// <summary>The latest minute bar of <paramref name="ticker"/>'s overnight session (20:00–04:00 ET), or null when
+	/// its latest bar is not an overnight one (the session is closed, or the symbol doesn't trade in it). The SPX family
+	/// reads SPY's overnight tape scaled into index units, the same splice as its pre/post-market. Nothing is cached or
+	/// written: this only feeds an in-memory spot override (<c>--overnight</c>).</summary>
+	internal static async Task<MinuteBar?> FetchLatestOvernightBarAsync(ApiConfig apiConfig, string ticker, CancellationToken cancellation)
+	{
+		var tickerIds = new ConcurrentDictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+		IReadOnlyList<MinuteBar> bars;
+		if (SpxFamilyTickers.Contains(ticker))
+			bars = await FetchSpxWithSpyExtendedAsync(apiConfig, ticker, tickerIds, BarInterval.M1, includeOvernight: true, cancellation);
+		else if (await ResolveChartTickerIdAsync(ticker, tickerIds, cancellation) is long tickerId)
+			bars = await WebullChartsClient.FetchIntradayBarsAsync(apiConfig, tickerId, BarInterval.M1, count: 5, includeExtended: true, cancellation, includeOvernight: true);
+		else
+			return null;
+
+		if (bars.Count == 0) return null;
+		var latest = bars[^1];
+		return latest.Close > 0m && IsOvernightSession(latest.Timestamp) ? latest : null;
+	}
+
+	/// <summary>True when a bar stamped <paramref name="barStart"/> falls in the overnight session: 20:00 ET up to the 04:00 ET pre-market open.</summary>
+	internal static bool IsOvernightSession(DateTimeOffset barStart)
+	{
+		var timeEt = MarketTime.ToEt(barStart).TimeOfDay;
+		return timeEt >= OvernightOpenEt || timeEt < PreMarketOpenEt;
+	}
+
+	private static readonly TimeSpan OvernightOpenEt = new(20, 0, 0);
+	private static readonly TimeSpan PreMarketOpenEt = new(4, 0, 0);
+
+	/// <summary>Chart-endpoint tickerId for a non-SPX-family <paramref name="ticker"/>, memoized in <paramref name="tickerIds"/>; null when unresolvable.
+	/// Chart-namespace overrides come FIRST: the option-chain endpoint and the chart endpoint use different tickerId namespaces
+	/// for cash indexes, and ResolveTickerIdsAsync returns chain-namespace IDs from KnownTickerIds, which produce nonsense data on
+	/// the chart endpoint. Tradable securities (SPY, QQQ, etc.) share the same ID across both endpoints and fall through to the search resolver.</summary>
+	private static async Task<long?> ResolveChartTickerIdAsync(string ticker, ConcurrentDictionary<string, long> tickerIds, CancellationToken cancellation)
+	{
+		if (tickerIds.TryGetValue(ticker, out var tickerId)) return tickerId;
+		if (!WebullChartsClient.TryResolveKnownChartTickerId(ticker, out tickerId))
+		{
+			var resolved = await WebullOptionsClient.ResolveTickerIdsAsync(new[] { ticker }, cancellation);
+			if (!resolved.TryGetValue(ticker, out tickerId)) return null;
+		}
+		tickerIds.TryAdd(ticker, tickerId);
+		return tickerId;
+	}
+
+	/// <summary>Fetches SPX RTH bars and SPY extended-hours bars (plus SPY's overnight session when <paramref name="includeOvernight"/>)
+	/// in parallel and splices them via <see cref="SpxFamilyTape.Merge"/> (SPX wins on overlap, SPY scaled into index units, volume 0).
+	/// Falls back to SPX-only on SPY resolution failure or insufficient data to compute the ratio.</summary>
 	private static async Task<IReadOnlyList<MinuteBar>> FetchSpxWithSpyExtendedAsync(
 		ApiConfig apiConfig,
 		string ticker,
 		ConcurrentDictionary<string, long> tickerIds,
 		BarInterval interval,
+		bool includeOvernight,
 		CancellationToken cancellation)
 	{
 		var spxTask = WebullChartsClient.FetchIntradayBarsAsync(apiConfig, ResolveRthChartTickerId(ticker), interval, SpxRthFetchCount, includeExtended: false, cancellation);
 
-		long spyId;
-		if (!tickerIds.TryGetValue("SPY", out spyId))
+		if (await ResolveChartTickerIdAsync("SPY", tickerIds, cancellation) is not long spyId)
 		{
-			var resolved = await WebullOptionsClient.ResolveTickerIdsAsync(new[] { "SPY" }, cancellation);
-			if (!resolved.TryGetValue("SPY", out spyId))
-			{
-				Console.WriteLine("Webull intraday: could not resolve SPY tickerId for pre-market proxy; using SPX RTH only.");
-				return SpxFamilyTape.Merge(await spxTask, Array.Empty<MinuteBar>());
-			}
-			tickerIds.TryAdd("SPY", spyId);
+			Console.WriteLine("Webull intraday: could not resolve SPY tickerId for pre-market proxy; using SPX RTH only.");
+			return SpxFamilyTape.Merge(await spxTask, Array.Empty<MinuteBar>());
 		}
 
-		var spyTask = WebullChartsClient.FetchIntradayBarsAsync(apiConfig, spyId, interval, SpyExtFetchCount, includeExtended: true, cancellation);
+		var spyTask = WebullChartsClient.FetchIntradayBarsAsync(apiConfig, spyId, interval, SpyExtFetchCount, includeExtended: true, cancellation, includeOvernight);
 
 		var spxBars = await spxTask;
 		var spyBars = await spyTask;

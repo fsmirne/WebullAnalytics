@@ -62,8 +62,8 @@ internal sealed class AnalyzeRiskSettings : AnalyzeBaseSettings
 			return ValidationResult.Success();
 		if (Fill?.IsSet == true && Fill.Value < 0)
 			return ValidationResult.Error($"--fill: N must be ≥ 1, got {Fill.Value}");
-		if (Fill?.IsSet == true && Date == null && (!string.IsNullOrEmpty(Spot) || Extended))
-			return ValidationResult.Error($"--fill evaluates at the fill's own instant by default, where the spot is the stored market's; pass --date now to use {(Extended ? "--extended" : "--spot")}");
+		if (Fill?.IsSet == true && Date == null && (!string.IsNullOrEmpty(Spot) || SpotSession != SpotSession.Regular))
+			return ValidationResult.Error($"--fill evaluates at the fill's own instant by default, where the spot is the stored market's; pass --date now to use {SpotSession.Flag() ?? "--spot"}");
 
 		if (!string.IsNullOrWhiteSpace(Spec))
 		{
@@ -142,7 +142,7 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 		if (quotes == null) return 1;
 
 		var ticker = parsedLegs[0].Option!.Root;
-		var spotOverrides = await AnalyzeCommon.ResolveSpotOverrideMapAsync(settings.Spot, settings.Extended, [ticker], settings.ResolvedVendor, underlyingPrices, cancellation);
+		var spotOverrides = await AnalyzeCommon.ResolveSpotOverrideMapAsync(settings.Spot, settings.SpotSession, [ticker], settings.ResolvedVendor, underlyingPrices, cancellation);
 		decimal ovSpot = 0m;
 		var hasSpotOverride = spotOverrides != null && ParsingHelpers.TryResolveForRoot(spotOverrides, ticker, out ovSpot);
 		var spot = hasSpotOverride ? ovSpot
@@ -167,7 +167,7 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 		var quoteAsOf = OptionMath.ObservationInstant();
 
 		// Re-base IV to the live mid surface (default; --calibrated false shows raw vendor IV for debugging).
-		// Always recalibrate against underlyingPrices (the book's own spot), never a hypothetical --spot / --extended override.
+		// Always recalibrate against underlyingPrices (the book's own spot), never a hypothetical --spot / --extended / --overnight override.
 		if (settings.Calibrated && underlyingPrices != null)
 			quotes = AnalyzeCommon.RecalibrateQuotesToMid(quotes, underlyingPrices, dividends: null, quoteAsOf);
 
@@ -247,7 +247,7 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 		var inputs = await LoadOpenerScoringInputsAsync(ticker, asOf, context.IncludeCurrentBar, intradayCache, cancellation);
 		var diagLegs = BuildDiagnosticLegs(positionLegs, quotes, spot, asOf, settings.IvDefault);
 		var diagnostic = RiskDiagnosticBuilder.Build(diagLegs, spot, quoteAsOf, sym => ResolveIv(quotes, sym, settings.IvDefault), trend, quotes, inputs.Sentiment);
-		// At hypothetical spots (--spot / --extended override when the book was frozen at the 16:00 close),
+		// At hypothetical spots (--spot / --extended / --overnight override when the book was frozen at the 16:00 close),
 		// the leg market mids are stale and back-solving IV against the overridden spot produces a nonsense IV.
 		// Use the quotes' already-normalized IV in that case for an internally-consistent projection.
 		var useMarketImpliedIv = !context.HasSpotOverride;

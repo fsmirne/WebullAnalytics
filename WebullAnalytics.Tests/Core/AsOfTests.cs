@@ -80,9 +80,24 @@ public class AsOfTests
 	[Fact]
 	public void Extended_IsRejectedAtAPastInstant()
 	{
-		Assert.NotNull(AsOf.Validate("2026-10-09", fillAllowed: false, spot: null, extended: true));
-		Assert.NotNull(AsOf.Validate("fill", fillAllowed: true, spot: null, extended: true));
-		Assert.Null(AsOf.Validate("now", fillAllowed: false, spot: null, extended: true));
-		Assert.Null(AsOf.Validate(DateTime.Today.AddDays(30).ToString("yyyy-MM-dd"), fillAllowed: false, spot: null, extended: true));
+		Assert.NotNull(AsOf.Validate("2026-10-09", fillAllowed: false, spot: null, session: SpotSession.Extended));
+		Assert.NotNull(AsOf.Validate("fill", fillAllowed: true, spot: null, session: SpotSession.Extended));
+		Assert.Null(AsOf.Validate("now", fillAllowed: false, spot: null, session: SpotSession.Extended));
+		Assert.Null(AsOf.Validate(DateTime.Today.AddDays(30).ToString("yyyy-MM-dd"), fillAllowed: false, spot: null, session: SpotSession.Extended));
+	}
+	[Fact]
+	public void Overnight_IsRejectedAtAPastInstant()
+	{
+		Assert.Equal("--overnight doesn't apply at a past --date: the spot is the stored market's at that instant", AsOf.Validate("2026-10-09", fillAllowed: false, spot: null, session: SpotSession.Overnight));
+		Assert.Null(AsOf.Validate("now", fillAllowed: false, spot: null, session: SpotSession.Overnight));
+	}
+
+	[Fact]
+	public void ExtendedAndOvernight_AreMutuallyExclusive()
+	{
+		Assert.NotNull(SpotSessionOptions.From(extended: true, overnight: true).Error);
+		Assert.Equal(SpotSession.Overnight, SpotSessionOptions.From(extended: false, overnight: true).Session);
+		Assert.Equal(SpotSession.Extended, SpotSessionOptions.From(extended: true, overnight: false).Session);
+		Assert.Equal(SpotSession.Regular, SpotSessionOptions.From(extended: false, overnight: false).Session);
 	}
 }

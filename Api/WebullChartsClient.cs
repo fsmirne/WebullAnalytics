@@ -78,19 +78,22 @@ internal static class WebullChartsClient
 	/// in-progress minute and so partial).
 	///
 	/// <paramref name="includeExtended"/>=true requests pre/post-market bars where the symbol supports
-	/// them; cash indexes (SPX, NDX) ignore this and return only RTH. ETFs and single names honor it.</summary>
+	/// them; cash indexes (SPX, NDX) ignore this and return only RTH. ETFs and single names honor it.
+	/// <paramref name="includeOvernight"/>=true also requests the overnight session (20:00–04:00 ET) where the
+	/// symbol trades in it; without it the endpoint stops at the 20:00 ET post-market close.</summary>
 	public static async Task<IReadOnlyList<MinuteBar>> FetchIntradayBarsAsync(
 		ApiConfig config,
 		long tickerId,
 		BarInterval interval,
 		int count,
 		bool includeExtended,
-		CancellationToken cancellationToken)
+		CancellationToken cancellationToken,
+		bool includeOvernight = false)
 	{
 		if (count <= 0) return Array.Empty<MinuteBar>();
 
 		var typeCode = BarIntervalToCode(interval);
-		var url = $"{ChartsQueryUrl}?tickerIds={tickerId}&type={typeCode}&count={count}&extendTrading={(includeExtended ? 1 : 0)}";
+		var url = $"{ChartsQueryUrl}?tickerIds={tickerId}&type={typeCode}&count={count}&extendTrading={(includeExtended ? 1 : 0)}{(includeOvernight ? "&overnight=1" : "")}";
 
 		var request = new HttpRequestMessage(HttpMethod.Get, url);
 		foreach (var (key, value) in DefaultHeaders) request.Headers.TryAddWithoutValidation(key, value);
