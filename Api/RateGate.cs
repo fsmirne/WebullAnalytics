@@ -44,10 +44,12 @@ internal sealed class RateGate
 	/// and a gate built as one still drew 429s. So this is the same bucket with margin: a burst of 2, then one call per 3 s.</summary>
 	internal static RateGate Webull { get; } = new(GateDirectory, burst: 2, interval: TimeSpan.FromSeconds(3));
 
-	/// <summary>Schwab market-data chains. Schwab publishes no figure; 120 requests a minute is the commonly cited cap, NOT measured. Every
-	/// live watch fetches a whole chain each management tick, a split fetch sends its windows at once, and the cascade read's 30-day $SPX
-	/// chain is several windows; with the SPXW and SPY watches both running, a cascade read drew a 429 (2026-11-20). One call per 0.5 s (120 a minute) after a burst of
-	/// 4 keeps a split fetch's windows together while holding the sustained rate to the cited cap.</summary>
+	/// <summary>Schwab market-data chains. Schwab publishes no figure, and the commonly cited 120 requests a minute is not its cap: measured 2026-11-23 with no
+	/// watch running, 10 cheap requests at once, 180 at 0.2 s spacing (~270 in the trailing minute) and 12 heavy $SPX range=ALL windows at once all returned 200.
+	/// The SPXW and SPY watches together send ~25 a minute, in bursts of 3–4 (a cascade read's windows plus a management tick), and still draw an occasional 429
+	/// with no Retry-After (a cascade read, 2026-11-20 and 2026-11-23): Schwab throttling on its own side, not a rate this gate could hold under. The chains
+	/// client's bounded retry is what absorbs those. One call per 0.5 s after a burst of 4 never binds on the watches' traffic; it stays as a ceiling on a
+	/// runaway fetch loop.</summary>
 	internal static RateGate Schwab { get; } = new(GateDirectory, burst: 4, interval: TimeSpan.FromMilliseconds(500));
 
 	/// <summary>The wait a 429 asks for: its Retry-After (delta or date) clamped to <paramref name="max"/>, else <paramref name="fallback"/>.</summary>

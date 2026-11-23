@@ -161,8 +161,8 @@ internal static class SchwabOptionsClient
 	/// <c>SocketException</c> "forcibly closed by the remote host") that show up as intermittent single-tick failures
 	/// in the live watch loop. Sends through the pooled <see cref="SchwabHttp.Client"/> (see its comment: churning a
 	/// fresh client per call is what provokes the RST in the first place); a fresh request message is used per attempt.
-	/// Every attempt waits its turn at <see cref="RateGate.Schwab"/>, shared by every local process, and a 429 that still arrives
-	/// (the cap is unmeasured) is retried after its Retry-After, a bounded number of times. Other failures (auth, 502 TooBig, timeouts)
+	/// Every attempt waits its turn at <see cref="RateGate.Schwab"/>, shared by every local process, and a 429 — Schwab's own sporadic
+	/// throttling, which arrives well under any rate the gate holds (see its comment) — is retried after its Retry-After, a bounded number of times. Other failures (auth, 502 TooBig, timeouts)
 	/// propagate to the caller unchanged.</summary>
 	private static async Task<(HttpStatusCode Status, string Body)> SendWithTransientRetryAsync(string url, string accessToken, CancellationToken ct)
 	{
