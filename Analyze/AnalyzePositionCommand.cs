@@ -72,19 +72,22 @@ internal sealed class AnalyzePositionSettings : AnalyzeIvOverrideSettings
 	public bool Theoretical { get; set; }
 
 	[CommandOption("--sell <SYMBOL>")]
-	[Description("Sweep the conversions of a single long around this short (OCC symbol): every listed short ±--strikes strikes and ±--exp expiries around it, never expiring after the long, is valued like the default conversions and shown — an EV grid by strike × expiry, then the full scenario table with no shortlist. Needs the live chain.")]
+	[Description("Single long: re-center the conversion EV grid on this short (OCC symbol) instead of the best conversion, sweeping ±--strikes listed strikes × ±--exp listed expiries around it (the window analyze roll --to sweeps, never past the long) and listing every one in the scenario table. --strikes / --exp are prompted (default 2) in an interactive terminal when omitted. Needs the live chain.")]
 	public string? Sell { get; set; }
 
 	[CommandOption("--strikes <N>")]
-	[Description("With --sell: ±N listed strikes around its strike. Default 2 (prompted in an interactive terminal when omitted).")]
+	[Description("Single long: ±N listed strikes around the conversion EV grid's center. Default 2.")]
 	public int? Strikes { get; set; }
 
 	[CommandOption("--exp <N>")]
-	[Description("With --sell: ±N listed expirations around its expiry, clamped at today. Default 2 (prompted in an interactive terminal when omitted).")]
+	[Description("Single long: ±N listed expirations around the conversion EV grid's center, clamped at today. Default 2.")]
 	public int? Exp { get; set; }
 
-	/// <summary>The parsed --sell anchor; null when not sweeping.</summary>
-	internal OptionParsed? SellAnchor => Sell != null ? ParsingHelpers.ParseOptionSymbol(Sell.Trim().ToUpperInvariant()) : null;
+	/// <summary>The --sell symbol, upper-cased; null when not given (the grid centers on the best conversion).</summary>
+	internal string? SellSymbol => string.IsNullOrWhiteSpace(Sell) ? null : Sell.Trim().ToUpperInvariant();
+
+	/// <summary>The parsed --sell symbol: the short the sweep and grid center on; null when none was given.</summary>
+	internal OptionParsed? SellAnchor => SellSymbol != null ? ParsingHelpers.ParseOptionSymbol(SellSymbol) : null;
 
 	/// <summary>True when --log-level debug — surfaces extra diagnostics (e.g. implied dividend) that
 	/// would otherwise clutter the proposal output.</summary>
@@ -136,13 +139,11 @@ internal sealed class AnalyzePositionSettings : AnalyzeIvOverrideSettings
 		if (Cash.HasValue && Cash.Value < 0m)
 			return ValidationResult.Error($"--cash: must be non-negative, got {Cash.Value}");
 
-		if ((Strikes.HasValue || Exp.HasValue) && Sell == null)
-			return ValidationResult.Error("--strikes / --exp size the --sell sweep; pass --sell <SYMBOL>");
-		if (Sell != null && SellAnchor == null)
-			return ValidationResult.Error($"--sell: '{Sell}' is not an OCC option symbol");
+		if (SellSymbol != null && SellAnchor == null)
+			return ValidationResult.Error($"--sell: '{SellSymbol}' is not an OCC option symbol");
 		if (Strikes is < 0 || Exp is < 0)
 			return ValidationResult.Error("--strikes / --exp: must be ≥ 0");
-		if (Sell != null && (Theoretical || DateSpec.Kind != AsOfKind.Now))
+		if (SellSymbol != null && (Theoretical || DateSpec.Kind != AsOfKind.Now))
 			return ValidationResult.Error("--sell sweeps the live chain; it can't run with --theoretical or a --date other than now");
 
 		return ValidationResult.Success();
@@ -210,7 +211,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		IReadOnlyDictionary<string, decimal>? underlyingPrices = null;
 		var positionSymbols = positionLegs.Select(l => l.Symbol).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
 		var structure = ClassifyStructure(positionLegs);
-		if (settings.SellAnchor is { } sellAnchor && ResolveConversionSweep(settings, sellAnchor, positionLegs, structure) is { } sweepError)
+		if (settings.SellAnchor != null && ResolveConversionSweep(settings, positionLegs, structure) is { } sweepError)
 		{
 			Console.Error.WriteLine($"Error: {sweepError}");
 			return 1;
@@ -273,13 +274,15 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			var pcpPutSymbols = settings.IsDebug
 				? positionLegs.Select(l => $"{l.Parsed.Root}{l.Parsed.ExpiryDate:yyMMdd}P{(int)Math.Round(l.Parsed.Strike * 1000m):00000000}")
 				: Enumerable.Empty<string>();
-			// The --sell sweep's window, read off the listed chain: a chain that lists contracts as quote-less stubs (Webull past the front
-			// expiry) is quoted here, or the sweep would see only the expiries Phase 1 refreshed.
-			var sweepSymbols = settings.SellAnchor is { } sweepAnchor && structure == StructureKind.SingleLong
-				? RollCandidateEnumerator.Window(alreadyFetched, positionLegs[0].Parsed, sweepAnchor, settings.Strikes ?? 2, settings.Exp ?? 2, asOf)
-					.Where(c => c.Parsed.ExpiryDate.Date <= positionLegs[0].Parsed.ExpiryDate.Date)
-					.Select(c => c.Symbol)
-				: [];
+			// A single long's conversion shorts — the --sell window, else the whole conversion universe — read off the listed chain: a chain
+			// that lists contracts as quote-less stubs (Webull past the front expiry) is quoted here, or the sweep would see only the expiries
+			// Phase 1 refreshed.
+			var sweepSymbols = structure != StructureKind.SingleLong ? []
+				: settings.SellAnchor is { } sweepAnchor
+					? RollCandidateEnumerator.Window(alreadyFetched, positionLegs[0].Parsed, sweepAnchor, settings.Strikes ?? 2, settings.Exp ?? 2, asOf)
+						.Where(c => c.Parsed.ExpiryDate.Date <= positionLegs[0].Parsed.ExpiryDate.Date)
+						.Select(c => c.Symbol)
+					: ConversionUniverse(alreadyFetched, positionLegs[0], spot.Value, asOf, settings.IvDefault).Select(c => c.Symbol);
 			// Fetch what Phase 1 left unquoted — absent, or listed as a stub.
 			var hypotheticalSymbols = EnumerateHypotheticalSymbols(positionLegs, structure, settings, spot.Value, asOf, quotes)
 				.Concat(pcpPutSymbols)
@@ -399,7 +402,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 		// When the opener scorer will re-value the scenarios, every swept candidate (rolls, single-long conversions) is kept for it and the shortlist is chosen afterwards on its EV.
 		var rescore = aiCfg != null && quotes != null && !settings.Theoretical;
-		var scenarios = GenerateScenarios(positionLegs, structure, settings, spot.Value, asOf, quotes, technicalBias, dividends, shortlistSwept: !rescore);
+		var scenarios = GenerateScenarios(positionLegs, structure, settings, spot.Value, asOf, quotes, technicalBias, dividends, shortlistSwept: false);
 		if (rescore)
 		{
 			var asOfNow = asOfMarket?.Instant ?? DateTime.Now;
@@ -407,8 +410,10 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			scenarios = await PositionAiResetScanner.ApplyAsync(
 				scenarios, positionLegs, structure, settings, aiCfg!, spot.Value,
 				asOfNow, quoteAsOf, quotes!, priceCache, intradayCache, cancellation);
-			scenarios = OrderScenariosForDisplay(settings.SellAnchor != null ? scenarios : ShortlistSwept(scenarios, settings.Cash, settings.Risk), settings.Cash, settings.Risk);
 		}
+		// Every swept candidate, valued; the --sell grid reads them all. The table shows the shortlist — or, sweeping around a --sell symbol, everything.
+		var allScenarios = scenarios;
+		scenarios = OrderScenariosForDisplay(settings.SellAnchor != null ? scenarios : ShortlistSwept(scenarios, settings.Cash, settings.Risk), settings.Cash, settings.Risk);
 
 		var toText = settings.OutputFormat.Equals("text", StringComparison.OrdinalIgnoreCase);
 		StringWriter? stringWriter = null;
@@ -434,8 +439,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		}
 		else
 		{
-			if (settings.SellAnchor is { } sweepAnchor)
-				RenderConversionSweepGrid(scenarios, sweepAnchor, renderConsole, ascii: toText);
+			if (structure == StructureKind.SingleLong)
+				RenderConversionSweepGrid(allScenarios, settings.SellAnchor, settings.Strikes ?? 2, settings.Exp ?? 2, settings.Cash, settings.Risk, renderConsole, ascii: toText);
 			RenderScenarioTable(scenarios, positionLegs, settings, renderConsole, ascii: toText);
 		}
 
@@ -1121,8 +1126,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		if (quotesForPricing != null)
 		{
 			var shorts = settings.SellAnchor is { } anchor
-				? SweepConversionShorts(quotesForPricing, longLeg, anchor, settings.Sell!.Trim().ToUpperInvariant(), settings.Strikes ?? 2, settings.Exp ?? 2, asOf)
-				: EnumerateConversionShorts(quotesForPricing, longLeg, spot, asOf);
+				? SweepConversionShorts(quotesForPricing, longLeg, anchor, settings.SellSymbol!, settings.Strikes ?? 2, settings.Exp ?? 2, asOf)
+				: EnumerateConversionShorts(quotesForPricing, longLeg, spot, asOf, settings.IvDefault);
 			foreach (var cand in shorts)
 			{
 				var shortMid = (cand.Quote.Bid!.Value + cand.Quote.Ask!.Value) / 2m;
@@ -1150,24 +1155,40 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		return OrderScenariosForDisplay(list, settings.Cash, settings.Risk);
 	}
 
-	/// <summary>Listed shorts (same right, two-sided and liquid) that convert <paramref name="longLeg"/> into a two-leg spread, never expiring after it:
-	/// ±5 strikes around spot at the 8 front expiries (calendars and diagonals) and at the long's own expiry (verticals), plus the long's strike at the
-	/// front expiries so a same-strike calendar is offered even when the long sits far from spot.</summary>
-	internal static List<RollCandidate> EnumerateConversionShorts(IReadOnlyDictionary<string, OptionContractQuote> quotes, PositionSnapshot longLeg, decimal spot, DateTime asOf)
+	/// <summary>Every listed short a single long can be converted with into a two-leg spread (vertical, calendar or diagonal, covered or inverted): same
+	/// right and book, expiring today through the long's expiry, struck within ±<see cref="ConversionBandSigmas"/>σ of spot — σ the long's IV over its
+	/// remaining life — or at the long's own strike, so a calendar is offered even when the long sits far from spot. Listed whatever its quote, so a
+	/// caller can quote stubs before <see cref="EnumerateConversionShorts"/> keeps the liquid ones. The band scales the sweep to the underlying and the
+	/// long's tenor; a fixed ±5 strikes around spot missed 2026-11-22's best conversion of a 12-11 731C (sell the 12-11 724C, EV +$278 vs Close now
+	/// −$1,145), 20 points above spot.</summary>
+	internal static IEnumerable<(string Symbol, OptionParsed Parsed, OptionContractQuote Quote)> ConversionUniverse(IReadOnlyDictionary<string, OptionContractQuote> quotes, PositionSnapshot longLeg, decimal spot, DateTime asOf, decimal ivDefaultPct)
 	{
 		var l = longLeg.Parsed;
-		(OptionParsed Anchor, int StrikesN, int ExpN)[] windows =
-		[
-			(l with { Strike = spot, ExpiryDate = asOf.Date }, 5, 7),
-			(l with { Strike = spot }, 5, 0),
-			(l with { ExpiryDate = asOf.Date }, 0, 7),
-		];
-		return windows
-			.SelectMany(w => RollCandidateEnumerator.Enumerate(quotes, l, longLeg.Symbol, w.Anchor, anchorSymbol: null, LegAction.Sell, w.StrikesN, w.ExpN, asOf).Candidates)
-			.Where(c => c.Parsed.ExpiryDate.Date <= l.ExpiryDate.Date)
-			.DistinctBy(c => c.Symbol, StringComparer.OrdinalIgnoreCase)
-			.ToList();
+		var sigma = quotes.TryGetValue(longLeg.Symbol, out var lq) && lq.ImpliedVolatility is > 0m ? lq.ImpliedVolatility.Value : ivDefaultPct / 100m;
+		var years = Math.Max(1, (l.ExpiryDate.Date - asOf.Date).Days) / 365.0;
+		var halfWidth = spot * ConversionBandSigmas * sigma * (decimal)Math.Sqrt(years);
+		return quotes
+			.Select(kv => (Symbol: kv.Key, Parsed: ParsingHelpers.ParseOptionSymbol(kv.Key), Quote: kv.Value))
+			.Where(c => c.Parsed is { } p && p.CallPut == l.CallPut && AnalyzeRollSettings.RootsShareBook(p.Root, l.Root, p.ExpiryDate, l.ExpiryDate)
+				&& p.ExpiryDate.Date >= asOf.Date && p.ExpiryDate.Date <= l.ExpiryDate.Date
+				&& (Math.Abs(p.Strike - spot) <= halfWidth || p.Strike == l.Strike)
+				&& !string.Equals(c.Symbol, longLeg.Symbol, StringComparison.OrdinalIgnoreCase))
+			// One contract per expiry and strike (SPX vs SPXW list the same strike): prefer the long's own root.
+			.GroupBy(c => (c.Parsed!.ExpiryDate.Date, c.Parsed.Strike))
+			.Select(g => g.OrderByDescending(c => string.Equals(c.Parsed!.Root, l.Root, StringComparison.OrdinalIgnoreCase)).First())
+			.Select(c => (c.Symbol, c.Parsed!, c.Quote));
 	}
+
+	/// <summary>Half-width of <see cref="ConversionUniverse"/>'s strike band, in σ of the long's remaining life.</summary>
+	private const decimal ConversionBandSigmas = 2m;
+
+	/// <summary>The liquid shorts of <see cref="ConversionUniverse"/> (two-sided, a non-zero bid, not a dead contract, not grossly wide — the bar
+	/// <c>analyze roll</c> sweeps with).</summary>
+	internal static List<RollCandidate> EnumerateConversionShorts(IReadOnlyDictionary<string, OptionContractQuote> quotes, PositionSnapshot longLeg, decimal spot, DateTime asOf, decimal ivDefaultPct) =>
+		ConversionUniverse(quotes, longLeg, spot, asOf, ivDefaultPct)
+			.Where(c => RollCandidateEnumerator.IsLiquidEnough(c.Quote, LegAction.Sell))
+			.Select(c => new RollCandidate(c.Symbol, c.Parsed, c.Quote, false, false))
+			.ToList();
 
 	/// <summary>The symbols the live chain is fetched for: the position's own, plus — for a single long, whose conversions sell any expiry from
 	/// today to the long's — a placeholder expiring today at the long's strike. A vendor that fetches the expiry window its requested symbols
@@ -1187,15 +1208,18 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 	/// <summary>Checks the --sell sweep applies to this position — a single long, the short on its root and right, expiring by the long — and sizes
 	/// it: --strikes / --exp, prompted (default 2) in an interactive terminal when omitted, else 2. Returns an error, or null.</summary>
-	private static string? ResolveConversionSweep(AnalyzePositionSettings settings, OptionParsed anchor, IReadOnlyList<PositionSnapshot> positionLegs, StructureKind structure)
+	private static string? ResolveConversionSweep(AnalyzePositionSettings settings, IReadOnlyList<PositionSnapshot> positionLegs, StructureKind structure)
 	{
 		if (structure != StructureKind.SingleLong)
-			return $"--sell sweeps the conversions of a single long; this position is a {structure}";
+			return $"--sell draws the conversions of a single long; this position is a {structure}";
 		var l = positionLegs[0].Parsed;
-		if (!AnalyzeRollSettings.RootsShareBook(anchor.Root, l.Root, anchor.ExpiryDate, l.ExpiryDate) || anchor.CallPut != l.CallPut)
-			return $"--sell {settings.Sell} must be a {(l.CallPut == "C" ? "call" : "put")} on {l.Root}, the long's root and right";
-		if (anchor.ExpiryDate.Date > l.ExpiryDate.Date)
-			return $"--sell expires {anchor.ExpiryDate:yyyy-MM-dd}, after the long's {l.ExpiryDate:yyyy-MM-dd}: the short can't outlive the long";
+		if (settings.SellAnchor is { } anchor)
+		{
+			if (!AnalyzeRollSettings.RootsShareBook(anchor.Root, l.Root, anchor.ExpiryDate, l.ExpiryDate) || anchor.CallPut != l.CallPut)
+				return $"--sell {settings.SellSymbol} must be a {(l.CallPut == "C" ? "call" : "put")} on {l.Root}, the long's root and right";
+			if (anchor.ExpiryDate.Date > l.ExpiryDate.Date)
+				return $"--sell expires {anchor.ExpiryDate:yyyy-MM-dd}, after the long's {l.ExpiryDate:yyyy-MM-dd}: the short can't outlive the long";
+		}
 		var interactive = !Console.IsInputRedirected;
 		settings.Strikes ??= interactive ? PromptCount("Strikes (±N around the short):") : 2;
 		settings.Exp ??= interactive ? PromptCount("Expiries (±N around the short):") : 2;
@@ -2521,30 +2545,31 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		}
 	}
 
-	/// <summary>The --sell sweep at a glance: each swept conversion's total EV (the table's "EV (Total)") placed by its short's strike (rows) and
-	/// expiry (columns). A partial — the contracts the cash funds, the rest held as they are — is marked with that count; the --sell anchor with ◆;
-	/// the best EV is bold. An empty cell is a short with no liquid two-sided quote. Hold and Close now are in the caption for reference.</summary>
-	private static void RenderConversionSweepGrid(IReadOnlyList<Scenario> scenarios, OptionParsed anchor, IAnsiConsole console, bool ascii)
+	/// <summary>A single long's conversion EV grid: each swept conversion's total EV (the table's "EV (Total)") placed by its short's strike (rows) and expiry (columns),
+	/// ±<paramref name="strikesN"/> listed strikes × ±<paramref name="expN"/> listed expiries around the best conversion (ranked as the table ranks)
+	/// — or around <paramref name="anchor"/>, the --sell short. A partial (the contracts the cash funds, the rest held as they are) is marked with that
+	/// count, the center with ◆, the best EV shown in bold. An empty cell is a short with no liquid two-sided quote. Hold and Close now are given for reference.</summary>
+	private static void RenderConversionSweepGrid(IReadOnlyList<Scenario> scenarios, OptionParsed? anchor, int strikesN, int expN, decimal? cash, decimal risk, IAnsiConsole console, bool ascii)
 	{
+		var swept = scenarios.Where(s => s.Swept && s.ExpectedPnLPerContract.HasValue && ShortOf(s) != null).ToList();
+		if (swept.Count == 0) return; // no live chain (--theoretical, a past --date) or no liquid short: nothing to grid
+		var center = anchor ?? ShortOf(OrderScenariosForDisplay(swept, cash, risk)[0])!;
 		var cells = new Dictionary<(DateTime Expiry, decimal Strike), Scenario>();
-		foreach (var sc in scenarios.Where(s => s.Swept && s.ExpectedPnLPerContract.HasValue))
-			if (sc.Book?.FirstOrDefault()?.Legs.SingleOrDefault(l => l.Action == LegAction.Sell)?.Parsed is { } shortLeg)
-				cells[(shortLeg.ExpiryDate.Date, shortLeg.Strike)] = sc;
-		if (cells.Count == 0)
-		{
-			console.MarkupLine("[yellow]--sell: no liquid two-sided short in the swept window.[/]");
-			return;
-		}
+		foreach (var sc in swept)
+			cells[(ShortOf(sc)!.ExpiryDate.Date, ShortOf(sc)!.Strike)] = sc;
 
+		var expiries = Around(cells.Keys.Select(k => k.Expiry).Distinct().Order().ToList(), center.ExpiryDate.Date, expN, (a, b) => Math.Abs((a - b).TotalDays));
+		var strikes = Around(cells.Keys.Where(k => expiries.Contains(k.Expiry)).Select(k => k.Strike).Distinct().Order().ToList(), center.Strike, strikesN, (a, b) => (double)Math.Abs(a - b));
 		decimal EvTotal(Scenario sc) => sc.ExpectedPnLPerContract!.Value * sc.Qty;
 		string Money(decimal v) => v >= 0m ? $"+${v:N0}" : $"-${Math.Abs(v):N0}";
-		var best = cells.Values.Max(EvTotal);
-		var expiries = cells.Keys.Select(k => k.Expiry).Distinct().Order().ToList();
+		var shown = cells.Where(c => expiries.Contains(c.Key.Expiry) && strikes.Contains(c.Key.Strike)).Select(c => EvTotal(c.Value)).ToList();
+		var best = shown.Count > 0 ? shown.Max() : 0m;
+
 		var table = new Table().Border(ascii ? TableBorder.Ascii : TableBorder.Rounded);
 		table.AddColumn(new TableColumn("Short strike").RightAligned());
 		foreach (var e in expiries)
 			table.AddColumn(new TableColumn($"{e:MM-dd} ({(e - EvaluationDate.Today.Date).Days}d)").RightAligned());
-		foreach (var strike in cells.Keys.Select(k => k.Strike).Distinct().OrderByDescending(k => k))
+		foreach (var strike in strikes.OrderByDescending(k => k))
 		{
 			var row = new List<string> { $"${strike:0.##}" };
 			foreach (var e in expiries)
@@ -2552,17 +2577,27 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				if (!cells.TryGetValue((e, strike), out var sc)) { row.Add("[dim]—[/]"); continue; }
 				var ev = EvTotal(sc);
 				var partial = sc.Book!.Count > 1 ? $" [dim]p{sc.Book[0].Qty}[/]" : "";
-				var mark = e == anchor.ExpiryDate.Date && strike == anchor.Strike ? "◆ " : "";
-				var text = $"{mark}{Money(ev)}";
-				row.Add($"{(ev == best ? $"[bold {(ev >= 0m ? "green" : "red")}]{text}[/]" : $"[{(ev >= 0m ? "green" : "red")}]{text}[/]")}{partial}");
+				var text = $"{(e == center.ExpiryDate.Date && strike == center.Strike ? "◆ " : "")}{Money(ev)}";
+				var color = ev >= 0m ? "green" : "red";
+				row.Add($"{(ev == best ? $"[bold {color}]{text}[/]" : $"[{color}]{text}[/]")}{partial}");
 			}
 			table.AddRow(row.ToArray());
 		}
 		string Reference(string name) => scenarios.FirstOrDefault(s => s.Name == name) is { ExpectedPnLPerContract: decimal ev } sc ? $"{name} {Money(ev * sc.Qty)}" : $"{name} —";
-		table.Title("Conversion EV by short strike × expiry");
+		table.Title(anchor == null ? "Conversion EV around the best conversion" : "Conversion EV by short strike × expiry");
 		console.Write(table);
-		console.MarkupLine($"[dim]Total EV per conversion; pN = partial on N contracts (what the cash funds); ◆ = --sell. For reference: {Reference("Hold to expiry")} · {Reference("Close now")}.[/]");
+		console.MarkupLine($"[dim]Total EV per conversion; pN = partial on N contracts (what the cash funds); ◆ = {(anchor == null ? "the best of the sweep" : "--sell")}. For reference: {Reference("Hold to expiry")} · {Reference("Close now")}.[/]");
 		console.WriteLine();
+	}
+
+	/// <summary>The short a swept conversion sells (its first Book structure's sell leg), or null.</summary>
+	private static OptionParsed? ShortOf(Scenario sc) => sc.Book?.FirstOrDefault()?.Legs.SingleOrDefault(l => l.Action == LegAction.Sell)?.Parsed;
+
+	/// <summary>±<paramref name="n"/> entries of the sorted <paramref name="sorted"/> around the one nearest <paramref name="target"/>.</summary>
+	private static List<T> Around<T>(List<T> sorted, T target, int n, Func<T, T, double> distance)
+	{
+		var i = Enumerable.Range(0, sorted.Count).MinBy(k => distance(sorted[k], target));
+		return sorted.Skip(Math.Max(0, i - n)).Take(2 * n + 1 - Math.Max(0, n - i)).ToList();
 	}
 
 	private static void RenderScenarioTable(IReadOnlyList<Scenario> scenarios, IReadOnlyList<PositionSnapshot> positionLegs, AnalyzePositionSettings settings, IAnsiConsole console, bool ascii)

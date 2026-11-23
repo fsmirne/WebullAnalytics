@@ -306,6 +306,11 @@ internal static class RiskDiagnosticProbeBuilder
 					kind = OpenStructureKind.ShortPutVertical;
 				if (shortLeg.Parsed.CallPut == "C" && shortLeg.Parsed.Strike < longLeg.Parsed.Strike)
 					kind = OpenStructureKind.ShortCallVertical;
+				// The debit shapes (short beyond the long, e.g. a long call converted by selling a higher strike): scored by ScoreLongVertical.
+				if (shortLeg.Parsed.CallPut == "P" && shortLeg.Parsed.Strike < longLeg.Parsed.Strike)
+					kind = OpenStructureKind.LongPutVertical;
+				if (shortLeg.Parsed.CallPut == "C" && shortLeg.Parsed.Strike > longLeg.Parsed.Strike)
+					kind = OpenStructureKind.LongCallVertical;
 			}
 			else if (shortLeg.Parsed.ExpiryDate.Date < longLeg.Parsed.ExpiryDate.Date)
 			{

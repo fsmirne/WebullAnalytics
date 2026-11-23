@@ -5,6 +5,8 @@ using Xunit;
 
 namespace WebullAnalytics.Tests.Pricing;
 
+// Re-marks price on OptionMath.ObservationInstant(), which reads the process-wide EvaluationDate pin: run with the tests that set it, not alongside them.
+[Collection("EvaluationDate")]
 public class QuoteRemarkTests
 {
 	private static readonly DateTime Expiry = DateTime.Today.AddDays(45);

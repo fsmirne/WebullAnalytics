@@ -139,7 +139,6 @@ public class PositionConversionTests
 	}
 
 	[Theory]
-	[InlineData(null, 2, null, "--strikes / --exp size the --sell sweep")]
 	[InlineData("NOTANOCC", null, null, "not an OCC option symbol")]
 	[InlineData("SPY261211C00700000", -1, null, "must be ≥ 0")]
 	public void SellSweep_Validation(string? sell, int? strikes, int? exp, string error)
@@ -147,5 +146,23 @@ public class PositionConversionTests
 		var result = new AnalyzePositionSettings { Sell = sell, Strikes = strikes, Exp = exp }.Validate();
 		Assert.False(result.Successful);
 		Assert.Contains(error, result.Message);
+	}
+
+	[Fact]
+	public void ConversionUniverse_IsTheSigmaBandUpToTheLong_PlusTheLongsStrike()
+	{
+		// A 12-18 680C at 20% IV, 28 days out from 11-20: ±2σ ≈ ±$77 around 700. Add a 600C (outside the band) and an 860C (outside it too);
+		// the long's own 680 strike is always in, and nothing past the long's expiry (01-15) is.
+		var quotes = Chain();
+		foreach (var k in new[] { 600m, 860m })
+			quotes[Sym(new DateTime(2026, 11, 27), k)] = new OptionContractQuote(Sym(new DateTime(2026, 11, 27), k), null, 1m, 1.1m, null, null, 50, 100, 0.20m);
+		quotes[Sym(LongExp, 680m)] = quotes[Sym(LongExp, 680m)] with { ImpliedVolatility = 0.20m };
+
+		var universe = AnalyzePositionCommand.ConversionUniverse(quotes, Long680(), Spot, AsOf, ivDefaultPct: 40m).Select(c => c.Parsed).ToList();
+
+		Assert.DoesNotContain(universe, p => p.Strike is 600m or 860m);
+		Assert.Contains(universe, p => p.Strike == 680m && p.ExpiryDate == new DateTime(2026, 11, 27));
+		Assert.All(universe, p => Assert.True(p.ExpiryDate <= LongExp));
+		Assert.DoesNotContain(universe, p => p.ExpiryDate == LongExp && p.Strike == 680m);   // the long itself
 	}
 }
