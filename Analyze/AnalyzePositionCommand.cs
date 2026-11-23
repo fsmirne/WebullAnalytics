@@ -2079,14 +2079,18 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		return baseReturn - riskAversion * capitalAtStake - sc.AssignmentPenaltyPerContract;
 	}
 
-	/// <summary>Keeps, of the swept roll candidates in <paramref name="scenarios"/>, the top 3 by rank, the best pure-EV fundable one (e.g. an inverted
-	/// diagonal that --risk penalized) and the best that needs no added margin; every other scenario passes through.</summary>
+	/// <summary>Keeps, of the swept candidates in <paramref name="scenarios"/> (rolls and single-long conversions), the top 3 by rank, the best-ranked
+	/// of each structure they leave held (<see cref="SweptShape"/>: vertical, inverted vertical, calendar, covered or inverted diagonal — so a
+	/// shape the top 3 crowd out is still offered by its best), the best pure-EV fundable one (e.g. an inverted diagonal that --risk penalized)
+	/// and the best that needs no added margin; every other scenario passes through.</summary>
 	internal static List<Scenario> ShortlistSwept(IReadOnlyList<Scenario> scenarios, decimal? availableCash, decimal riskAversion)
 	{
 		var swept = scenarios.Where(s => s.Swept).ToList();
 		if (swept.Count == 0) return scenarios.ToList();
 		var ranked = OrderScenariosForDisplay(swept, availableCash, riskAversion);
 		var selected = new HashSet<Scenario>(ranked.Take(3), ReferenceEqualityComparer.Instance);
+		foreach (var bestOfShape in ranked.GroupBy(SweptShape).Select(g => g.First()))
+			selected.Add(bestOfShape);
 		var bestPureEv = swept
 			.Where(r => IsScenarioFundable(r, availableCash) && r.ExpectedPnLPerContract.HasValue && !selected.Contains(r))
 			.OrderByDescending(r => r.ExpectedPnLPerContract!.Value)
@@ -2097,6 +2101,16 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		foreach (var r in ranked)
 			Log.Debug($"Swept {(selected.Contains(r) ? "kept   " : "dropped")} rank {RiskAdjustedRankScore(r, riskAversion),9:F2}  EV {r.ExpectedPnLPerContract,9:F2}  {(IsScenarioFundable(r, availableCash) ? "fundable  " : "unfundable")}  {r.Name}");
 		return scenarios.Where(s => !s.Swept || selected.Contains(s)).ToList();
+	}
+
+	/// <summary>The two-leg structure a swept scenario leaves held (<see cref="PairShapeLabel"/> of the short and long in its first Book structure);
+	/// "other" for anything that isn't one short and one long.</summary>
+	private static string SweptShape(Scenario sc)
+	{
+		var legs = sc.Book?.FirstOrDefault()?.Legs;
+		var shortLeg = legs?.SingleOrDefault(l => l.Action == LegAction.Sell);
+		var longLeg = legs?.SingleOrDefault(l => l.Action == LegAction.Buy);
+		return legs is { Count: 2 } && shortLeg != null && longLeg != null ? PairShapeLabel(shortLeg.Parsed, longLeg.Parsed) : "other";
 	}
 
 	/// <remarks>A modeled scenario left without an EV (the opener scorer could not value one of its structures) ranks after every one with an EV:
@@ -2654,8 +2668,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		return (new[] { BuildComboFromLegs(legs) }, analyze);
 	}
 
-	/// <summary>Builds a single combo `wa trade place` line from parsed legs. `--limit` is the absolute
-	/// per-share signed net (sell prices add, buy prices subtract); Webull infers side from the legs.</summary>
+	/// <summary>Builds a single combo `wa trade place` line from parsed legs at their signed per-share net (sell prices add, buy prices
+	/// subtract), its --side named from the sign (<see cref="AI.Output.ReproductionCommands.FormatPlace"/>).</summary>
 	private static string BuildComboFromLegs(IEnumerable<(string Action, string Symbol, string Qty, string Price)> halfLegs)
 	{
 		var list = halfLegs.ToList();
@@ -2665,9 +2679,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			if (!decimal.TryParse(l.Price, NumberStyles.Any, CultureInfo.InvariantCulture, out var p)) continue;
 			signedNet += l.Action == "sell" ? p : -p;
 		}
-		var halfLimit = Math.Abs(signedNet).ToString("F2", CultureInfo.InvariantCulture);
 		var halfArg = string.Join(",", list.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}"));
-		return $"wa trade place \"{halfArg}\" --limit {halfLimit}";
+		return AI.Output.ReproductionCommands.FormatPlace(halfArg, list.Count, signedNet);
 	}
 
 	/// <summary>Builds a RiskDiagnostic for the given position and appends it to the analyze-position

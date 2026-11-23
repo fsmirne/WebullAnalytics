@@ -32,6 +32,18 @@ internal static class ReproductionCommands
 	private static string PlaceLine(IEnumerable<ProposalLeg> legs, decimal limitPerShare, string suffix = "") =>
 		$"wa trade place \"{TradesArg(legs)}\" --limit {limitPerShare.ToString("F2", CultureInfo.InvariantCulture)}{suffix}";
 
+	/// <summary>A <c>wa trade place</c> line for <paramref name="tradesArg"/> at the signed per-share net (credit positive, debit negative). A combo
+	/// names its --side from that sign rather than leaving it to the leg-structure inferrer, which can't tell: an inverted diagonal or a roll is
+	/// a debit or a credit depending on the prices (the inferrer reads every diagonal as a debit). A single leg's side is its own action.</summary>
+	internal static string FormatPlace(string tradesArg, int legCount, decimal signedNetPerShare, string suffix = "")
+	{
+		var side = legCount > 1 ? $" --side {(signedNetPerShare >= 0m ? "sell" : "buy")}" : "";
+		return $"wa trade place \"{tradesArg}\"{side} --limit {Math.Abs(signedNetPerShare).ToString("F2", CultureInfo.InvariantCulture)}{suffix}";
+	}
+
+	private static string SignedPlaceLine(IReadOnlyList<ProposalLeg> legs, decimal signedNetPerShare, string suffix = "") =>
+		FormatPlace(TradesArg(legs), legs.Count, signedNetPerShare, suffix);
+
 	private static string RiskLine(IEnumerable<ProposalLeg> legs) => $"wa analyze risk \"{TradesArg(legs)}\"";
 
 	private static string TradesArg(IEnumerable<ProposalLeg> legs) => string.Join(",", legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}"));
@@ -51,11 +63,11 @@ internal static class ReproductionCommands
 		if (groups.Count > 1)
 		{
 			foreach (var g in groups)
-				lines.Add(PlaceLine(g.Legs, SuggestionPricing.TryGetLimitPerShare(g.Legs, suggestPricing) ?? 0m, $"  # {g.Label}"));
+				lines.Add(SignedPlaceLine(g.Legs, SuggestionPricing.TryGetSignedNetPerShare(g.Legs, suggestPricing) ?? 0m, $"  # {g.Label}"));
 		}
 		else
 		{
-			lines.Add(PlaceLine(p.Legs, SuggestionPricing.TryGetLimitPerShare(p.Legs, suggestPricing) ?? Math.Abs(p.DebitOrCreditPerContract / 100m)));
+			lines.Add(SignedPlaceLine(p.Legs, SuggestionPricing.TryGetSignedNetPerShare(p.Legs, suggestPricing) ?? p.DebitOrCreditPerContract / 100m));
 		}
 
 		lines.Add(AnalyzeLine(p.Legs, l => explicitAnalyzePrices && l.PricePerShare.HasValue

@@ -65,6 +65,54 @@ public class CandidateScorerCalendarTests
 	}
 
 	[Fact]
+	public void CreditInvertedDiagonal_IsScoredOnStrikeGapLessCredit()
+	{
+		// The 2026-11-22 shape: sell a near ITM 700C against a later, higher 731C — the short is worth more than the long, a net credit.
+		// Capital at risk = strike gap − credit; profitable below, so a single (lower) breakeven with the one-sided POP.
+		var asOf = new DateTime(2026, 11, 23);
+		var shortExp = new DateTime(2026, 11, 27);
+		var longExp = new DateTime(2026, 12, 11);
+		var shortSym = MatchKeys.OccSymbol("SPY", shortExp, 700m, "C");
+		var longSym = MatchKeys.OccSymbol("SPY", longExp, 731m, "C");
+		var skel = new CandidateSkeleton("SPY", OpenStructureKind.LongDiagonal, new[]
+		{
+			new ProposalLeg("sell", shortSym, 1),
+			new ProposalLeg("buy", longSym, 1)
+		}, TargetExpiry: shortExp);
+		var quotes = new Dictionary<string, OptionContractQuote>
+		{
+			[shortSym] = TestQuote.Q(9.90m, 10.10m, 0.22m),
+			[longSym] = TestQuote.Q(4.90m, 5.10m, 0.25m)
+		};
+
+		var p = CandidateScorer.ScoreCalendarOrDiagonal(skel, spot: 704.74m, asOf, quotes, bias: 0m, Cfg(), applyLiquidityGate: false);
+
+		Assert.NotNull(p);
+		Assert.Equal(500m, p!.DebitOrCreditPerContract);                 // $10.00 − $5.00 credit
+		Assert.Equal(3100m - 500m, p.CapitalAtRiskPerContract);         // $31 gap less the credit
+		Assert.Equal(-(3100m - 500m), p.MaxLossPerContract);
+		Assert.Single(p.Breakevens);
+		Assert.True(p.ProbabilityOfProfit > 0m);
+	}
+
+	[Fact]
+	public void CreditCalendar_LeavesNothingAtRisk_IsRejected()
+	{
+		var asOf = new DateTime(2026, 4, 20);
+		var shortExp = new DateTime(2026, 4, 24);
+		var longExp = new DateTime(2026, 5, 15);
+		var shortSym = MatchKeys.OccSymbol("SPY", shortExp, 500m, "C");
+		var longSym = MatchKeys.OccSymbol("SPY", longExp, 500m, "C");
+		var skel = new CandidateSkeleton("SPY", OpenStructureKind.LongCalendar, new[] { new ProposalLeg("sell", shortSym, 1), new ProposalLeg("buy", longSym, 1) }, TargetExpiry: shortExp);
+		var quotes = new Dictionary<string, OptionContractQuote>
+		{
+			[shortSym] = TestQuote.Q(5.40m, 5.60m, 0.40m),   // front quoted above the back month: a quote artifact
+			[longSym] = TestQuote.Q(4.90m, 5.10m, 0.40m)
+		};
+		Assert.Null(CandidateScorer.ScoreCalendarOrDiagonal(skel, spot: 500m, asOf, quotes, bias: 0m, Cfg(), applyLiquidityGate: false));
+	}
+
+	[Fact]
 	public void CalendarDirectionalFitIsZero()
 	{
 		var asOf = new DateTime(2026, 4, 20);

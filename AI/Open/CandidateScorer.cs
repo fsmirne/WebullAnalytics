@@ -2392,7 +2392,6 @@ internal static class CandidateScorer
 		var shortMid = (shortQ.Value.Bid + shortQ.Value.Ask) / 2m;
 		var longMid = (longQ.Value.Bid + longQ.Value.Ask) / 2m;
 		var debitPerShare = PriceForBuy(longMid, longQ.Value.Ask, pricingMode) - PriceForSell(shortMid, shortQ.Value.Bid, pricingMode);
-		if (debitPerShare <= 0m) return null;
 		if (applyLiquidityGate && !PassesEntryNoiseGate(skel.Legs, quotes, debitPerShare, cfg.MinEntryToNoiseRatio)) return null;
 		// Short-leg time-value gate: the calendar/diagonal thesis is selling the short leg's extrinsic.
 		// A deep-ITM short (e.g. SPY 713P with spot ~694: mid $18.79, intrinsic ~$18.7, quote $2.34 wide)
@@ -2422,6 +2421,12 @@ internal static class CandidateScorer
 		// are unaffected; calendars share a strike and never have a gap.
 		if (applyLiquidityGate && strikeLossPerShare > 0m && skel.StructureKind == OpenStructureKind.LongDiagonal && !cfg.Structures.LongDiagonal.AllowInverted) return null;
 		var capitalAtRisk = debitPerContract + strikeLossPerContract;
+		// A net credit is an inverted diagonal whose ITM short is worth more than the long (2026-11-22: sell the 11-27 700C against a
+		// 12-11 731C): still a real trade, scored like any other on capital at risk = strike gap − credit. The rest of the model is
+		// sign-correct for it — P&L at the short expiry is long residual − short intrinsic − debit, ManagedEv takes the signed entry
+		// as the credit verticals do, the breakeven scan and the one-sided POP handle its single breakeven. A calendar or covered
+		// diagonal has no gap, so a credit there leaves nothing at risk: a quote artifact, not a trade.
+		if (debitPerShare <= 0m && capitalAtRisk <= 0m) return null;
 		// Capital-efficiency divisor = the real capital at risk. For calendars and COVERED diagonals the
 		// strike gap is 0 (the legs sit on the non-loss side), so this equals the debit — unchanged from
 		// the prior debit-only behavior. For INVERTED / reverse diagonals the strike gap IS the dominant

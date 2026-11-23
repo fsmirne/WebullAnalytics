@@ -13,7 +13,8 @@ internal static class SuggestionPricing
 		? leg.ExecutionPricePerShare ?? leg.PricePerShare
 		: leg.PricePerShare ?? leg.ExecutionPricePerShare;
 
-	internal static decimal? TryGetLimitPerShare(IEnumerable<ProposalLeg> legs, string mode)
+	/// <summary>The legs' net per share at <paramref name="mode"/> prices, signed: credit received positive, debit paid negative. Null when a leg has no price.</summary>
+	internal static decimal? TryGetSignedNetPerShare(IEnumerable<ProposalLeg> legs, string mode)
 	{
 		decimal signedNet = 0m;
 		foreach (var leg in legs)
@@ -23,7 +24,7 @@ internal static class SuggestionPricing
 			signedNet += leg.Action == "sell" ? price.Value : -price.Value;
 		}
 
-		return Math.Abs(signedNet);
+		return signedNet;
 	}
 
 	internal static string AnalyzeKeywordFor(ProposalLeg leg, string mode) => Normalize(mode) == BidAsk

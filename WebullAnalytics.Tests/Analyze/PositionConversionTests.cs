@@ -72,8 +72,14 @@ public class PositionConversionTests
 		var all = Conversions(shortlist: false);
 		var shortlisted = Conversions(shortlist: true);
 		Assert.True(all.Count > 5);
-		Assert.InRange(shortlisted.Count, 1, 5);
+		// Top 3 overall, the best of each structure the sweep produced, plus the best pure-EV and best no-added-margin picks.
+		var shapes = all.Select(Shape).Distinct().ToList();
+		Assert.InRange(shortlisted.Count, 1, 3 + shapes.Count + 2);
+		Assert.Equal(shapes.Order(), shortlisted.Select(Shape).Distinct().Order());
 	}
+
+	/// <summary>A conversion's structure, from its name ("Convert to inverted diagonal (sell …)").</summary>
+	private static string Shape(AnalyzePositionCommand.Scenario s) => s.Name["Convert to ".Length..s.Name.IndexOf(" (", StringComparison.Ordinal)];
 
 	[Fact]
 	public void ALegInReproducesAsTheStructureItForms()

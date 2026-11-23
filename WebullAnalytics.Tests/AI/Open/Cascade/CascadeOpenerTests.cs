@@ -574,7 +574,7 @@ public class CascadeOpenerTests
 		Assert.Contains($"▶ BULL TRAP 76/100 · ShortCallVertical SPXW x{p.Qty} · credit $", text);
 		Assert.Contains("max loss $", text);
 		Assert.Contains($"SELL {Occ(7550m)} x{p.Qty}, BUY {Occ(7560m)} x{p.Qty}", text);
-		Assert.Contains($"wa trade place \"sell:{Occ(7550m)}:{p.Qty},buy:{Occ(7560m)}:{p.Qty}\" --limit", text);
+		Assert.Contains($"wa trade place \"sell:{Occ(7550m)}:{p.Qty},buy:{Occ(7560m)}:{p.Qty}\" --side sell --limit", text);
 		Assert.Contains($"wa analyze trade \"sell:{Occ(7550m)}:{p.Qty}@MID,buy:{Occ(7560m)}:{p.Qty}@MID\"", text);
 		Assert.Contains($"wa analyze risk \"sell:{Occ(7550m)}:{p.Qty},buy:{Occ(7560m)}:{p.Qty}\"", text);
 

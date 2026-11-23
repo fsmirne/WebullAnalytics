@@ -127,10 +127,7 @@ internal sealed class ProposalSink
 			}
 			else
 			{
-				var tradesArg = string.Join(",", p.Legs.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}"));
-				var limitPerShare = SuggestionPricing.TryGetLimitPerShare(p.Legs, _suggestPricing) ?? Math.Abs(p.NetDebit / 100m);
-				var limit = limitPerShare.ToString("F2", CultureInfo.InvariantCulture);
-				rows.Add(new Markup($"[dim]{_cmdPrefix} wa trade place \"{Markup.Escape(tradesArg)}\" --limit {limit}[/]"));
+				AppendComboLine(rows, p.Legs, _suggestPricing, p.NetDebit / 100m);
 			}
 
 			rows.Add(new Markup($"[dim]{_cmdPrefix} wa analyze trade \"{Markup.Escape(analyzeArg)}\"[/]"));
@@ -152,18 +149,14 @@ internal sealed class ProposalSink
 		AnsiConsole.WriteLine();
 	}
 
-	/// <summary>Emits a single combo `wa trade place` line for the given legs. `--limit` is the absolute
-	/// per-share signed net (sell prices add, buy prices subtract); Webull infers side from the legs.
-	/// Callers must ensure every leg has PricePerShare set.</summary>
-	private void AppendComboLine(List<IRenderable> rows, IEnumerable<ProposalLeg> legs, string suggestPricing, decimal? fallbackLimitPerShare)
+	/// <summary>Emits a single combo `wa trade place` line for the given legs at their signed per-share net (sell prices add, buy prices
+	/// subtract; <paramref name="fallbackSignedNetPerShare"/> when a leg has no price), its --side named from the sign.</summary>
+	private void AppendComboLine(List<IRenderable> rows, IEnumerable<ProposalLeg> legs, string suggestPricing, decimal? fallbackSignedNetPerShare)
 	{
 		var list = legs.ToList();
-		var limitPerShare = SuggestionPricing.TryGetLimitPerShare(list, suggestPricing)
-			   ?? fallbackLimitPerShare
-			   ?? 0m;
-		var limit = limitPerShare.ToString("F2", CultureInfo.InvariantCulture);
+		var signedNet = SuggestionPricing.TryGetSignedNetPerShare(list, suggestPricing) ?? fallbackSignedNetPerShare ?? 0m;
 		var arg = string.Join(",", list.Select(l => $"{l.Action}:{l.Symbol}:{l.Qty}"));
-		rows.Add(new Markup($"[dim]{_cmdPrefix} wa trade place \"{Markup.Escape(arg)}\" --limit {limit}[/]"));
+		rows.Add(new Markup($"[dim]{_cmdPrefix} {Markup.Escape(ReproductionCommands.FormatPlace(arg, list.Count, signedNet))}[/]"));
 	}
 
 	private static Color SpectreColor(string name) => name switch
