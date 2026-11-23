@@ -140,7 +140,7 @@ internal static class SchwabOptionsClient
 			+ $"&includeUnderlyingQuote=true&fromDate={from:yyyy-MM-dd}&toDate={to:yyyy-MM-dd}"
 			+ (strikeCount > 0 ? $"&strikeCount={strikeCount}" : "");
 
-		var (statusCode, body) = await SendWithTransientRetryAsync(url, accessToken, ct);
+		var (statusCode, body) = await SendWithTransientRetryAsync(url, $"{symbol} {from:yyyy-MM-dd}..{to:yyyy-MM-dd}", accessToken, ct);
 		if (statusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
 			throw new SchwabAuthException($"chains request unauthorized (HTTP {(int)statusCode}) — token rejected.");
 		if (!IsSuccess(statusCode))
@@ -163,8 +163,9 @@ internal static class SchwabOptionsClient
 	/// fresh client per call is what provokes the RST in the first place); a fresh request message is used per attempt.
 	/// Every attempt waits its turn at <see cref="RateGate.Schwab"/>, shared by every local process, and a 429 — Schwab's own sporadic
 	/// throttling, which arrives well under any rate the gate holds (see its comment) — is retried after its Retry-After, a bounded number of times. Other failures (auth, 502 TooBig, timeouts)
-	/// propagate to the caller unchanged.</summary>
-	private static async Task<(HttpStatusCode Status, string Body)> SendWithTransientRetryAsync(string url, string accessToken, CancellationToken ct)
+	/// propagate to the caller unchanged. <paramref name="label"/> names the request (symbol and expiry window) in the 429 line, with Schwab's body,
+	/// so a throttled request can be told apart from the rest of a tick's fetches.</summary>
+	private static async Task<(HttpStatusCode Status, string Body)> SendWithTransientRetryAsync(string url, string label, string accessToken, CancellationToken ct)
 	{
 		const int maxAttempts = 3;
 		for (var attempt = 1; ; attempt++)
@@ -180,7 +181,8 @@ internal static class SchwabOptionsClient
 				if (response.StatusCode == HttpStatusCode.TooManyRequests && attempt < maxAttempts)
 				{
 					var wait = RateGate.RetryAfter(response, RateLimitWait, MaxRateLimitWait);
-					Console.WriteLine($"Schwab: chains HTTP 429; retry {attempt} of {maxAttempts - 1} in {wait.TotalSeconds:F1}s.");
+					var reason = Truncate(await response.Content.ReadAsStringAsync(ct), 200);
+					Console.WriteLine($"Schwab: chains HTTP 429 for {label} ({reason}); retry {attempt} of {maxAttempts - 1} in {wait.TotalSeconds:F1}s.");
 					await Task.Delay(wait, ct);
 					continue;
 				}
