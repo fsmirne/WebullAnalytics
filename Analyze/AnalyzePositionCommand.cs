@@ -131,6 +131,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 	{
 		var appConfig = Program.LoadAppConfig("report");
 		if (appConfig != null) settings.ApplyConfig(appConfig);
+		if (settings.LogLevel != null) Log.Level = Log.Parse(settings.LogLevel); // the flag overrides config.json's log-level for this run
 
 		if (settings.PinnedInstant is { } instant) ReportCommand.PinEvaluation(instant);
 
@@ -2093,6 +2094,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		if (bestPureEv != null) selected.Add(bestPureEv);
 		var bestZeroBp = ranked.FirstOrDefault(r => r.MarginDeltaPerContract <= 0m && !selected.Contains(r));
 		if (bestZeroBp != null) selected.Add(bestZeroBp);
+		foreach (var r in ranked)
+			Log.Debug($"Swept {(selected.Contains(r) ? "kept   " : "dropped")} rank {RiskAdjustedRankScore(r, riskAversion),9:F2}  EV {r.ExpectedPnLPerContract,9:F2}  {(IsScenarioFundable(r, availableCash) ? "fundable  " : "unfundable")}  {r.Name}");
 		return scenarios.Where(s => !s.Swept || selected.Contains(s)).ToList();
 	}
 
