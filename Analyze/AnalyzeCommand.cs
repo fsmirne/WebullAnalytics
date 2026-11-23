@@ -332,7 +332,12 @@ internal static class AnalyzeCommon
 				: null;
 		}
 
-		underlyings = BookSpots(quotes, underlyings, MarketTime.NowEt(), await ExDividendsSinceStrikeAsync(underlyings.Keys, cancellation));
+		// BookSpots reads parity off-hours only, so only then is the dividend calendar needed.
+		var nowEt = MarketTime.NowEt();
+		var exDividends = SchwabOptionsClient.IsRegularTradingHours(nowEt)
+			? new Dictionary<string, DateTime>()
+			: await AI.Events.ExDividendDates.SinceStrikeAsync(underlyings.Keys.ToList(), new AI.OpenerEventsConfig(), EvaluationDate.Today, cancellation);
+		underlyings = BookSpots(quotes, underlyings, nowEt, exDividends);
 		// Clock-consistent IVs against the book's own spot. The Schwab branch already normalized inside LiveQuoteSource against the
 		// vendor spot; normalizing is idempotent (it always solves from the mid, else the preserved vendor IV), so re-running it here
 		// re-bases those IVs too when BookSpots moved the spot.
@@ -358,22 +363,6 @@ internal static class AnalyzeCommon
 			if (AI.PremarketSpotOverride.DeriveSpotFromParity(parityRoot, quotes, OptionMath.RiskFreeRate, nowEt, allowLastPrice: false, excludeExpiriesFrom: exDiv) is { Spot: > 0m } parity)
 				result[root] = Math.Round(parity.Spot, 2);
 		}
-		return result;
-	}
-
-	/// <summary>Each root's next ex-dividend date when it falls after the session the quotes were struck in (<see cref="OptionMath.ObservationInstant"/>):
-	/// the dividend a frozen or live book is still carrying. Off-hours only — <see cref="BookSpots"/> doesn't read parity during RTH. Roots
-	/// with no scheduled dividend (cash indexes, non-payers) are absent.</summary>
-	private static async Task<IReadOnlyDictionary<string, DateTime>> ExDividendsSinceStrikeAsync(IEnumerable<string> roots, CancellationToken cancellation)
-	{
-		var result = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
-		var list = roots.ToList();
-		if (list.Count == 0 || SchwabOptionsClient.IsRegularTradingHours(MarketTime.NowEt())) return result;
-		var struckOn = OptionMath.ObservationInstant().Date;
-		var calendar = await AI.Events.EventCalendarLoader.LoadAsync(list, new AI.OpenerEventsConfig(), EvaluationDate.Today, cancellation);
-		foreach (var root in list)
-			if (calendar.Get(root)?.NextExDividendDate is DateTime ex && ex.Date > struckOn)
-				result[root] = ex.Date;
 		return result;
 	}
 
