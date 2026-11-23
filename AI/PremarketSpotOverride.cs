@@ -105,15 +105,21 @@ internal static class PremarketSpotOverride
 
 	internal readonly record struct ParityResult(decimal Spot, decimal AtmStrike, int Dte);
 
+	/// <summary>How many strikes nearest the money <see cref="DeriveSpotFromParity"/> reads parity at before taking the median.</summary>
+	private const int ParityStrikes = 5;
+
 	/// <summary>Back-solves the underlying spot from put-call parity on the ATM straddle in the fetched
 	/// option chain. Returns null if no expiry has a strike with both a call and put quote.
 	/// Parity (European, no dividends — exact for cash-settled SPX/SPXW/NDX/XSP/RUT): S = (C - P) + K * exp(-r*T).
-	/// Picks the nearest non-negative DTE expiry, then the strike where |C_mid - P_mid| is minimum (ATM).
-	/// Quote preference per leg: bid+ask mid (bid=0, ask>0, ask=bid), else LastPrice if positive. The LastPrice
+	/// Picks the nearest non-negative DTE expiry, then reads parity at the <see cref="ParityStrikes"/> strikes nearest the money (smallest
+	/// |C_mid - P_mid|) and returns their median: one pair's half-spreads move a single reading by a fifth of a point on NVDA, and the
+	/// median of its neighbours shrugs that off. A cash dividend inside the expiry's life adds −PV(D) to C − P, so parity reads the spot
+	/// low by the dividend; <paramref name="excludeExpiriesFrom"/> (the next ex-dividend date after the quotes were struck) skips every
+	/// expiry on or after it, and a chain whose expiries all span the ex-date yields null. Quote preference per leg: bid+ask mid (bid=0, ask>0, ask=bid), else LastPrice if positive. The LastPrice
 	/// fallback handles premarket chains where Webull echoes the prior-session close but omits bid/ask; pass
 	/// <paramref name="allowLastPrice"/> = false to reject it — required when the result must be FRESH (the
 	/// auto premarket override), since a quote-less chain would otherwise echo yesterday's spot back as live.</summary>
-	internal static ParityResult? DeriveSpotFromParity(string ticker, IReadOnlyDictionary<string, OptionContractQuote> quotes, double riskFreeRate, DateTime asOf, Action<string>? diag = null, bool allowLastPrice = true)
+	internal static ParityResult? DeriveSpotFromParity(string ticker, IReadOnlyDictionary<string, OptionContractQuote> quotes, double riskFreeRate, DateTime asOf, Action<string>? diag = null, bool allowLastPrice = true, DateTime? excludeExpiriesFrom = null)
 	{
 		// Group by expiry: { expiry → { strike → (call?, put?) } }.
 		var byExpiry = new Dictionary<DateTime, Dictionary<decimal, (OptionContractQuote? call, OptionContractQuote? put)>>();
@@ -133,33 +139,30 @@ internal static class PremarketSpotOverride
 			return null;
 		}
 
-		// Pick the nearest non-negative DTE expiry that has at least one strike with both call+put viable mids.
-		foreach (var expiry in byExpiry.Keys.Where(d => d.Date >= asOf.Date).OrderBy(d => d))
+		// Pick the nearest non-negative DTE expiry (not spanning the ex-dividend date) that has at least one strike with both call+put viable mids.
+		foreach (var expiry in byExpiry.Keys.Where(d => d.Date >= asOf.Date && (excludeExpiriesFrom is not DateTime exDiv || d.Date < exDiv.Date)).OrderBy(d => d))
 		{
 			var byStrike = byExpiry[expiry];
-			decimal? bestStrike = null;
-			decimal bestDiff = decimal.MaxValue;
-			decimal bestC = 0m, bestP = 0m;
-			int bothPresent = 0, callOnly = 0, putOnly = 0, neither = 0;
+			var pairs = new List<(decimal Strike, decimal Call, decimal Put)>();
+			int callOnly = 0, putOnly = 0, neither = 0;
 			foreach (var (k, pair) in byStrike)
 			{
 				var cMid = Mid(pair.call, allowLastPrice);
 				var pMid = Mid(pair.put, allowLastPrice);
-				if (cMid != null && pMid != null) bothPresent++;
+				if (cMid != null && pMid != null) pairs.Add((k, cMid.Value, pMid.Value));
 				else if (cMid != null) callOnly++;
 				else if (pMid != null) putOnly++;
 				else neither++;
-				if (cMid == null || pMid == null) continue;
-				var diff = Math.Abs(cMid.Value - pMid.Value);
-				if (diff < bestDiff) { bestDiff = diff; bestStrike = k; bestC = cMid.Value; bestP = pMid.Value; }
 			}
-			diag?.Invoke($"  {ticker} {expiry:yyyy-MM-dd}: {byStrike.Count} strikes (both={bothPresent}, callOnly={callOnly}, putOnly={putOnly}, neither={neither}).");
-			if (bestStrike == null) continue;
+			diag?.Invoke($"  {ticker} {expiry:yyyy-MM-dd}: {byStrike.Count} strikes (both={pairs.Count}, callOnly={callOnly}, putOnly={putOnly}, neither={neither}).");
+			if (pairs.Count == 0) continue;
 
 			var dte = Math.Max(0, (expiry.Date - asOf.Date).Days);
 			var discount = (decimal)Math.Exp(-riskFreeRate * dte / 365.0);
-			var spot = (bestC - bestP) + bestStrike.Value * discount;
-			return new ParityResult(spot, bestStrike.Value, dte);
+			var nearest = pairs.OrderBy(p => Math.Abs(p.Call - p.Put)).Take(ParityStrikes).ToList();
+			var spots = nearest.Select(p => p.Call - p.Put + p.Strike * discount).Order().ToList();
+			var median = spots.Count % 2 == 1 ? spots[spots.Count / 2] : (spots[spots.Count / 2 - 1] + spots[spots.Count / 2]) / 2m;
+			return new ParityResult(median, nearest[0].Strike, dte);
 		}
 		return null;
 

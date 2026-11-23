@@ -9,6 +9,7 @@ public class QuoteRemarkTests
 {
 	private static readonly DateTime Expiry = DateTime.Today.AddDays(45);
 	private const decimal Sigma = 0.25m;
+	private static readonly IReadOnlyDictionary<string, DateTime> NoDividends = new Dictionary<string, DateTime>();
 
 	private static OptionTime Time(string root) => MarketClock.Between(root, OptionMath.ObservationInstant(), Expiry.Date + OptionMath.MarketClose);
 
@@ -96,8 +97,8 @@ public class QuoteRemarkTests
 		}
 		var vendor = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { ["SPY"] = 697.48m };
 
-		Assert.Equal(693.26m, AnalyzeCommon.BookSpots(quotes, vendor, sunday)["SPY"], 2);
-		Assert.Equal(697.48m, AnalyzeCommon.BookSpots(quotes, vendor, monday.AddHours(10))["SPY"]);
+		Assert.Equal(693.26m, AnalyzeCommon.BookSpots(quotes, vendor, sunday, NoDividends)["SPY"], 2);
+		Assert.Equal(697.48m, AnalyzeCommon.BookSpots(quotes, vendor, monday.AddHours(10), NoDividends)["SPY"]);
 	}
 
 	[Fact]

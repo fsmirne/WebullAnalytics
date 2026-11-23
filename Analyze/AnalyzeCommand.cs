@@ -332,7 +332,7 @@ internal static class AnalyzeCommon
 				: null;
 		}
 
-		underlyings = BookSpots(quotes, underlyings, MarketTime.NowEt());
+		underlyings = BookSpots(quotes, underlyings, MarketTime.NowEt(), await ExDividendsSinceStrikeAsync(underlyings.Keys, cancellation));
 		// Clock-consistent IVs against the book's own spot. The Schwab branch already normalized inside LiveQuoteSource against the
 		// vendor spot; normalizing is idempotent (it always solves from the mid, else the preserved vendor IV), so re-running it here
 		// re-bases those IVs too when BookSpots moved the spot.
@@ -344,18 +344,36 @@ internal static class AnalyzeCommon
 	/// <summary>The spot each root's option book is actually struck at. During RTH that is the vendor's live spot. Outside it the book
 	/// is either frozen at its last print — which is neither the 16:00 equity close nor the post-market last (SPY's options trade to
 	/// 16:15; on 2026-11-20 the frozen book's parity sat at 693.26 between the 689.81 close Webull reports and the 697.48 post-market
-	/// last Schwab reports) — or live in a global session; either way its own put-call parity is the spot it prices. Roots whose chain
-	/// has no two-sided call/put pair keep the vendor spot.</summary>
-	internal static IReadOnlyDictionary<string, decimal> BookSpots(IReadOnlyDictionary<string, OptionContractQuote> quotes, IReadOnlyDictionary<string, decimal> vendorSpots, DateTime nowEt)
+	/// last Schwab reports) — or live in a global session; either way its own put-call parity is the spot it prices. Parity is read
+	/// on expiries that end before the root's next ex-dividend date in <paramref name="exDividends"/> (a dividend inside the
+	/// expiry reads the spot low by its PV). Roots whose chain has no two-sided call/put pair on such an expiry keep the vendor spot.</summary>
+	internal static IReadOnlyDictionary<string, decimal> BookSpots(IReadOnlyDictionary<string, OptionContractQuote> quotes, IReadOnlyDictionary<string, decimal> vendorSpots, DateTime nowEt, IReadOnlyDictionary<string, DateTime> exDividends)
 	{
 		if (SchwabOptionsClient.IsRegularTradingHours(nowEt) || vendorSpots.Count == 0) return vendorSpots;
 		var result = new Dictionary<string, decimal>(vendorSpots, StringComparer.OrdinalIgnoreCase);
 		foreach (var root in vendorSpots.Keys)
 		{
 			var parityRoot = string.Equals(root, "SPX", StringComparison.OrdinalIgnoreCase) ? "SPXW" : root;
-			if (AI.PremarketSpotOverride.DeriveSpotFromParity(parityRoot, quotes, OptionMath.RiskFreeRate, nowEt, allowLastPrice: false) is { Spot: > 0m } parity)
+			DateTime? exDiv = exDividends.TryGetValue(root, out var ex) ? ex : null;
+			if (AI.PremarketSpotOverride.DeriveSpotFromParity(parityRoot, quotes, OptionMath.RiskFreeRate, nowEt, allowLastPrice: false, excludeExpiriesFrom: exDiv) is { Spot: > 0m } parity)
 				result[root] = Math.Round(parity.Spot, 2);
 		}
+		return result;
+	}
+
+	/// <summary>Each root's next ex-dividend date when it falls after the session the quotes were struck in (<see cref="OptionMath.ObservationInstant"/>):
+	/// the dividend a frozen or live book is still carrying. Off-hours only — <see cref="BookSpots"/> doesn't read parity during RTH. Roots
+	/// with no scheduled dividend (cash indexes, non-payers) are absent.</summary>
+	private static async Task<IReadOnlyDictionary<string, DateTime>> ExDividendsSinceStrikeAsync(IEnumerable<string> roots, CancellationToken cancellation)
+	{
+		var result = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+		var list = roots.ToList();
+		if (list.Count == 0 || SchwabOptionsClient.IsRegularTradingHours(MarketTime.NowEt())) return result;
+		var struckOn = OptionMath.ObservationInstant().Date;
+		var calendar = await AI.Events.EventCalendarLoader.LoadAsync(list, new AI.OpenerEventsConfig(), EvaluationDate.Today, cancellation);
+		foreach (var root in list)
+			if (calendar.Get(root)?.NextExDividendDate is DateTime ex && ex.Date > struckOn)
+				result[root] = ex.Date;
 		return result;
 	}
 
