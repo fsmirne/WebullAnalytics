@@ -137,9 +137,9 @@ public class PositionScenarioRevalueTests
 	public void TheRollShortlistIsChosenOnTheEvItIsGiven()
 	{
 		// Six candidates, ranked by the EV they carry after re-valuing: the top 3, the best pure-EV one left (roll 3) and the best needing no margin (roll 5).
-		var rolls = Enumerable.Range(0, 6).Select(i => Scenario(i == 5 ? -1m : 100m) with { Name = $"roll {i}", SweptRoll = true, ExpectedPnLPerContract = -100m * i }).ToList();
+		var rolls = Enumerable.Range(0, 6).Select(i => Scenario(i == 5 ? -1m : 100m) with { Name = $"roll {i}", Swept = true, ExpectedPnLPerContract = -100m * i }).ToList();
 		var other = Scenario(0m) with { Name = "hold" };
-		var kept = AnalyzePositionCommand.ShortlistSweptRolls([other, .. rolls], availableCash: null, riskAversion: 0m);
+		var kept = AnalyzePositionCommand.ShortlistSwept([other, .. rolls], availableCash: null, riskAversion: 0m);
 		Assert.Equal(["hold", "roll 0", "roll 1", "roll 2", "roll 3", "roll 5"], kept.Select(s => s.Name));
 	}
 
