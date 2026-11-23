@@ -339,20 +339,20 @@ internal sealed class BacktestRunner
 			if (!openPositions.TryGetValue(p.PositionKey, out var pos)) continue;
 			if (p.Kind == ProposalKind.Close)
 			{
-				var legFills = BuildLegFillsFromQuotes(p.Legs, pos.Quantity, quotes, p.Marketable);
+				var legFills = BuildLegFillsFromQuotes(p.Legs, pos.Quantity, quotes, underlyings.GetValueOrDefault(pos.Ticker), p.Marketable);
 				if (legFills != null) { _book.Close(ts, p.PositionKey, legFills, p.Rule, underlyings.GetValueOrDefault(pos.Ticker)); acted.Add(p.PositionKey); }
-				else if (recordDrop) RecordUnfilledRuleAction(p, pos, quotes);
+				else if (recordDrop) RecordUnfilledRuleAction(p, pos, quotes, underlyings.GetValueOrDefault(pos.Ticker));
 			}
 			else if (p.Kind == ProposalKind.Roll)
 			{
-				var legFills = BuildLegFillsFromQuotes(p.Legs, pos.Quantity, quotes);
+				var legFills = BuildLegFillsFromQuotes(p.Legs, pos.Quantity, quotes, underlyings.GetValueOrDefault(pos.Ticker));
 				if (legFills != null) { _book.Roll(ts, p.PositionKey, legFills, p.Rule, underlyings.GetValueOrDefault(pos.Ticker)); acted.Add(p.PositionKey); }
-				else if (recordDrop) RecordUnfilledRuleAction(p, pos, quotes);
+				else if (recordDrop) RecordUnfilledRuleAction(p, pos, quotes, underlyings.GetValueOrDefault(pos.Ticker));
 			}
 			else if (p.Kind == ProposalKind.LegIn)
 			{
-				var legFills = BuildLegFillsFromQuotes(p.Legs, pos.Quantity, quotes);
-				if (legFills == null && recordDrop) RecordUnfilledRuleAction(p, pos, quotes);
+				var legFills = BuildLegFillsFromQuotes(p.Legs, pos.Quantity, quotes, underlyings.GetValueOrDefault(pos.Ticker));
+				if (legFills == null && recordDrop) RecordUnfilledRuleAction(p, pos, quotes, underlyings.GetValueOrDefault(pos.Ticker));
 				// Rule emits the new structure name via convention: LongCall→LongCallVertical, LongPut→LongPutVertical.
 				// Derive from the existing strategy + the fact that the new leg is opposite-side.
 				if (legFills != null)
@@ -375,19 +375,18 @@ internal sealed class BacktestRunner
 	/// <summary>Records why the 09:30 pass couldn't fill a rule's action. Not printed here: the minute walk retries
 	/// from 09:31, and an opening-minute market that is merely too wide usually fills minutes later — printing
 	/// "position left open" at 09:30 read as the position riding to expiry when it closed at 09:49.</summary>
-	private void RecordUnfilledRuleAction(ManagementProposal p, OpenPosition pos, IReadOnlyDictionary<string, OptionContractQuote> quotes)
+	private void RecordUnfilledRuleAction(ManagementProposal p, OpenPosition pos, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal spot)
 	{
 		// Distinguish the two reasons BuildLegFillsFromQuotes returns null: a genuine store gap (no quote
 		// at all) vs a leg whose market is too wide to trust — the two need different messages, and
 		// printing "NO quotes exist" for a leg that has a perfectly real, just-too-wide quote is misleading.
 		var wideLeg = p.Legs.FirstOrDefault(l => quotes.TryGetValue(l.Symbol, out var q) && q.Bid is > 0m && q.Ask is > 0m
-			&& !CandidateScorer.PassesFillSpreadGate(new[] { l.Symbol }, quotes, _config.Opener.Liquidity.MaxFillSpreadPctOfMid, _config.Opener.Liquidity.MinAbsFillSpreadDollars));
+			&& !CandidateScorer.PassesFillSpreadGate(new[] { l.Symbol }, quotes, spot, _config.Opener.Liquidity.MaxFillSpreadPctOfExtrinsic, _config.Opener.Liquidity.MinAbsFillSpreadDollars));
 		if (wideLeg != null)
 		{
 			var q = quotes[wideLeg.Symbol];
-			var spread = q.Ask!.Value - q.Bid!.Value;
-			var mid = (q.Bid.Value + q.Ask.Value) / 2m;
-			_unfilledRuleActions[p.PositionKey] = $"{p.Rule} proposed {p.Kind} for {pos.Ticker} {p.PositionKey} at 09:30 but {wideLeg.Symbol}'s market ({q.Bid}/{q.Ask}, {spread / mid:P0} of mid) was too wide to trust as a fill, and no later minute filled it";
+			var fraction = OptionMath.QuoteSpreadFraction(q.Bid!.Value, q.Ask!.Value, ParsingHelpers.ParseOptionSymbol(wideLeg.Symbol), spot);
+			_unfilledRuleActions[p.PositionKey] = $"{p.Rule} proposed {p.Kind} for {pos.Ticker} {p.PositionKey} at 09:30 but {wideLeg.Symbol}'s market ({q.Bid}/{q.Ask}, {fraction:P0} of extrinsic) was too wide to trust as a fill, and no later minute filled it";
 		}
 		else
 		{
@@ -493,9 +492,9 @@ internal sealed class BacktestRunner
 	/// rather than in StopLossRule/TakeProfitRule.</summary>
 	/// <param name="marketable">The proposal is a marketable close (<see cref="ManagementProposal.Marketable"/> — a stop): live sends it at the side
 	/// that trades now, so each leg fills at its touch (sell at the bid, buy at the ask) whatever the pricing mode.</param>
-	private IReadOnlyList<BacktestLegFill>? BuildLegFillsFromQuotes(IReadOnlyList<ProposalLeg> legs, int qty, IReadOnlyDictionary<string, OptionContractQuote> quotes, bool marketable = false)
+	private IReadOnlyList<BacktestLegFill>? BuildLegFillsFromQuotes(IReadOnlyList<ProposalLeg> legs, int qty, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal spot, bool marketable = false)
 	{
-		if (!CandidateScorer.PassesFillSpreadGate(legs.Select(l => l.Symbol), quotes, _config.Opener.Liquidity.MaxFillSpreadPctOfMid, _config.Opener.Liquidity.MinAbsFillSpreadDollars)) return null;
+		if (!CandidateScorer.PassesFillSpreadGate(legs.Select(l => l.Symbol), quotes, spot, _config.Opener.Liquidity.MaxFillSpreadPctOfExtrinsic, _config.Opener.Liquidity.MinAbsFillSpreadDollars)) return null;
 		var fills = new List<BacktestLegFill>(legs.Count);
 		foreach (var l in legs)
 		{
@@ -1380,7 +1379,7 @@ internal sealed class BacktestRunner
 			// Fill-realism check on the basis actually being used (the confirming minute's quotes, when a
 			// confirmation happened above) — same gate ApplyManagementResults' BuildLegFillsFromQuotes
 			// applies for the shared-rule path; this fast path builds fills inline so it needs its own call.
-			if (!CandidateScorer.PassesFillSpreadGate(symbols, quotes, _config.Opener.Liquidity.MaxFillSpreadPctOfMid, _config.Opener.Liquidity.MinAbsFillSpreadDollars)) continue;
+			if (!CandidateScorer.PassesFillSpreadGate(symbols, quotes, spot, _config.Opener.Liquidity.MaxFillSpreadPctOfExtrinsic, _config.Opener.Liquidity.MinAbsFillSpreadDollars)) continue;
 
 			var legFills = new List<BacktestLegFill>(pos.Legs.Count);
 			bool allLegsPriced = true;

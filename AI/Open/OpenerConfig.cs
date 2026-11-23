@@ -855,18 +855,18 @@ internal sealed class OpenerLiquidityConfig
 	/// thin" under the 25% relative gate. Set to a very high number to disable the escape hatch.</summary>
 	[JsonPropertyName("minAbsoluteOpenInterest")] public long MinAbsoluteOpenInterest { get; set; } = 100;
 
-	/// <summary>Hard reject: a leg's spread as a fraction of its own mid, ABOVE which the market is too
-	/// wide to trust its mid as an achievable price — see <see cref="CandidateScorer.PassesFillSpreadGate"/>
+	/// <summary>Hard reject: a leg's spread as a fraction of its extrinsic value (its mid out of the money —
+	/// see <see cref="OptionMath.QuoteSpreadFraction"/>), ABOVE which the market is too wide to trust its mid as an achievable price — see <see cref="CandidateScorer.PassesFillSpreadGate"/>
 	/// for the trade that motivated this (SPY's own 09:30:00 open quote, 15-19% of mid, wasn't torn/garbage
 	/// data, it just hadn't settled yet). Only rejects when the leg ALSO clears
 	/// <see cref="MinAbsFillSpreadDollars"/> — a cheap, thin, genuinely-wide-in-% far-OTM leg is normal and
 	/// must not trip this. Default 0.12 (12%): a ~3x cushion over SPY's observed settled baseline
 	/// (2.6-4.2%) while decisively catching the observed 15.4%/19.4% unsettled-open case. Distinct from,
-	/// and much tighter than, <see cref="OpenerQuoteGuardConfig.MaxSpreadPctOfMid"/> (default 50%), which
+	/// and much tighter than, <see cref="OpenerQuoteGuardConfig.MaxSpreadPctOfExtrinsic"/> (default 50%), which
 	/// detects torn/garbage NBBO — a different, much rarer failure mode. 0 disables.</summary>
-	[JsonPropertyName("maxFillSpreadPctOfMid")] public decimal MaxFillSpreadPctOfMid { get; set; } = 0.12m;
+	[JsonPropertyName("maxFillSpreadPctOfExtrinsic")] public decimal MaxFillSpreadPctOfExtrinsic { get; set; } = 0.12m;
 
-	/// <summary>Absolute-dollar floor paired with <see cref="MaxFillSpreadPctOfMid"/> (AND, not OR) — a
+	/// <summary>Absolute-dollar floor paired with <see cref="MaxFillSpreadPctOfExtrinsic"/> (AND, not OR) — a
 	/// leg only fails when its spread clears BOTH. Default $0.50: SPY's incident legs were $1.67-1.91
 	/// wide, comfortably above this; a $0.20 option with a nickel-wide $0.05 market (25% of mid) stays
 	/// well under it and is correctly left alone.</summary>
@@ -894,14 +894,15 @@ internal sealed class OpenerQuoteGuardConfig
 	/// Default 120s. 0 disables the staleness check.</summary>
 	[JsonPropertyName("maxQuoteAgeSeconds")] public int MaxQuoteAgeSeconds { get; set; } = 120;
 
-	/// <summary>A leg's two-sided quote is "torn" when its spread exceeds BOTH this fraction of the mid AND
+	/// <summary>A leg's two-sided quote is "torn" when its spread exceeds BOTH this fraction of its extrinsic value (its mid out of the
+	/// money — see <see cref="OptionMath.QuoteSpreadFraction"/>) AND
 	/// <see cref="MinAbsSpreadDollars"/> — the AND keeps genuinely cheap options (wide in % but pennies in
 	/// absolute terms) from tripping it. A crossed quote (bid ≥ ask) is always torn regardless. Default 0.50
-	/// (50% of mid). 0 disables the wide-spread check (crossed is still caught).</summary>
-	[JsonPropertyName("maxSpreadPctOfMid")] public decimal MaxSpreadPctOfMid { get; set; } = 0.50m;
+	/// (50%). 0 disables the wide-spread check (crossed is still caught).</summary>
+	[JsonPropertyName("maxSpreadPctOfExtrinsic")] public decimal MaxSpreadPctOfExtrinsic { get; set; } = 0.50m;
 
 	/// <summary>Absolute spread floor (dollars/share) for the torn-NBBO check; a leg trips only when its
-	/// spread clears this AND <see cref="MaxSpreadPctOfMid"/>. Default $1.00.</summary>
+	/// spread clears this AND <see cref="MaxSpreadPctOfExtrinsic"/>. Default $1.00.</summary>
 	[JsonPropertyName("minAbsSpreadDollars")] public decimal MinAbsSpreadDollars { get; set; } = 1.00m;
 }
 

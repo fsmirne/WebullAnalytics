@@ -12,7 +12,7 @@ namespace WebullAnalytics.Tests.AI.Open;
 /// logged-off feed returned a torn long-call quote (bid 10.36 / ask 20.36) and a $2-off --limit.</summary>
 public class QuoteSanityTests
 {
-	private static readonly OpenerQuoteGuardConfig Cfg = new(); // defaults: 120s, 50% of mid, $1.00 abs
+	private static readonly OpenerQuoteGuardConfig Cfg = new(); // defaults: 120s, 50% of extrinsic, $1.00 abs
 
 	private static OptionContractQuote Q(string sym, decimal? bid, decimal? ask, DateTimeOffset? t = null) =>
 		new(sym, LastPrice: null, Bid: bid, Ask: ask, Change: null, PercentChange: null, Volume: null, OpenInterest: null, ImpliedVolatility: null, QuoteTime: t);
@@ -23,14 +23,14 @@ public class QuoteSanityTests
 	public void TornDetectsTheRealJul13TornLongLeg()
 	{
 		// The actual poisoned quote: $10 wide, ask ~2x bid.
-		Assert.NotNull(QuoteSanity.TornReason(Q("SPY260814C00750000", 10.36m, 20.36m), Cfg.MaxSpreadPctOfMid, Cfg.MinAbsSpreadDollars));
+		Assert.NotNull(QuoteSanity.TornReason("SPY260814C00750000", Q("SPY260814C00750000", 10.36m, 20.36m), null, Cfg.MaxSpreadPctOfExtrinsic, Cfg.MinAbsSpreadDollars));
 	}
 
 	[Fact]
 	public void TornIgnoresTightHealthyQuote()
 	{
 		// The clean 2026-07-14 quote: $0.07 wide.
-		Assert.Null(QuoteSanity.TornReason(Q("SPY260821P00751000", 12.47m, 12.54m), Cfg.MaxSpreadPctOfMid, Cfg.MinAbsSpreadDollars));
+		Assert.Null(QuoteSanity.TornReason("SPY260821P00751000", Q("SPY260821P00751000", 12.47m, 12.54m), null, Cfg.MaxSpreadPctOfExtrinsic, Cfg.MinAbsSpreadDollars));
 	}
 
 	[Fact]
@@ -38,21 +38,30 @@ public class QuoteSanityTests
 	{
 		// A genuinely cheap OTM strike: bid 0.10 / ask 0.20 is 67% of mid but only $0.10 absolute — NOT torn
 		// (the abs-spread floor spares it). This is the false-positive the AND-of-two-thresholds prevents.
-		Assert.Null(QuoteSanity.TornReason(Q("SPY260720C00770000", 0.10m, 0.20m), Cfg.MaxSpreadPctOfMid, Cfg.MinAbsSpreadDollars));
+		Assert.Null(QuoteSanity.TornReason("SPY260720C00770000", Q("SPY260720C00770000", 0.10m, 0.20m), null, Cfg.MaxSpreadPctOfExtrinsic, Cfg.MinAbsSpreadDollars));
+	}
+
+	[Fact]
+	public void TornMeasuresADeepItmQuoteAgainstItsExtrinsic()
+	{
+		// 2026-11-23 pre-open: SPY 12-11 660C at 65.67/75.70 with spot $722.73 — 14% of mid, but $10.03 wide on $7.96 of extrinsic.
+		var quote = Q("SPY261211C00660000", 65.67m, 75.70m);
+		Assert.NotNull(QuoteSanity.TornReason("SPY261211C00660000", quote, 722.73m, Cfg.MaxSpreadPctOfExtrinsic, Cfg.MinAbsSpreadDollars));
+		Assert.Null(QuoteSanity.TornReason("SPY261211C00660000", quote, null, Cfg.MaxSpreadPctOfExtrinsic, Cfg.MinAbsSpreadDollars));   // spot unknown: % of mid
 	}
 
 	[Fact]
 	public void TornFlagsCrossedQuoteRegardlessOfWidth()
 	{
-		Assert.NotNull(QuoteSanity.TornReason(Q("X", 5.00m, 4.90m), Cfg.MaxSpreadPctOfMid, Cfg.MinAbsSpreadDollars)); // bid > ask
+		Assert.NotNull(QuoteSanity.TornReason("X", Q("X", 5.00m, 4.90m), null, Cfg.MaxSpreadPctOfExtrinsic, Cfg.MinAbsSpreadDollars)); // bid > ask
 	}
 
 	[Fact]
 	public void TornIgnoresOneSidedQuote()
 	{
 		// Absent/one-sided quote is the liquidity gate's job, not integrity.
-		Assert.Null(QuoteSanity.TornReason(Q("X", null, 5.0m), Cfg.MaxSpreadPctOfMid, Cfg.MinAbsSpreadDollars));
-		Assert.Null(QuoteSanity.TornReason(Q("X", 0m, 0m), Cfg.MaxSpreadPctOfMid, Cfg.MinAbsSpreadDollars));
+		Assert.Null(QuoteSanity.TornReason("X", Q("X", null, 5.0m), null, Cfg.MaxSpreadPctOfExtrinsic, Cfg.MinAbsSpreadDollars));
+		Assert.Null(QuoteSanity.TornReason("X", Q("X", 0m, 0m), null, Cfg.MaxSpreadPctOfExtrinsic, Cfg.MinAbsSpreadDollars));
 	}
 
 	[Fact]
@@ -64,7 +73,7 @@ public class QuoteSanityTests
 			["SPY260814C00750000"] = Q("SPY260814C00750000", 10.36m, 20.36m), // torn long
 		};
 		var legs = new List<ProposalLeg> { new("sell", "SPY260720C00750000", 1), new("buy", "SPY260814C00750000", 1) };
-		var issues = QuoteSanity.TornLegs(legs, book, Cfg);
+		var issues = QuoteSanity.TornLegs(legs, book, null, Cfg);
 		Assert.Single(issues);
 		Assert.Equal("SPY260814C00750000", issues[0].Symbol);
 		Assert.Equal(QuoteIssueKind.TornNbbo, issues[0].Kind);
@@ -75,7 +84,7 @@ public class QuoteSanityTests
 	{
 		var book = new Dictionary<string, OptionContractQuote>(StringComparer.OrdinalIgnoreCase) { ["X"] = Q("X", 10m, 20m) };
 		var legs = new List<ProposalLeg> { new("buy", "X", 1) };
-		Assert.Empty(QuoteSanity.TornLegs(legs, book, new OpenerQuoteGuardConfig { Enabled = false }));
+		Assert.Empty(QuoteSanity.TornLegs(legs, book, null, new OpenerQuoteGuardConfig { Enabled = false }));
 	}
 
 	// ---- feed staleness -------------------------------------------------------------------------------

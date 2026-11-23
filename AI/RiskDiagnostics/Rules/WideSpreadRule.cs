@@ -2,7 +2,7 @@ using System.Globalization;
 
 namespace WebullAnalytics.AI.RiskDiagnostics.Rules;
 
-/// <summary>Fires when the worst leg's bid/ask spread exceeds 25% of mid. Wide spreads on any single leg
+/// <summary>Fires when the worst leg's bid/ask spread exceeds 25% of its extrinsic value (its mid out of the money). Wide spreads on any single leg
 /// gate the whole structure's exit cost — even a tight short can't compensate for a long whose mid is
 /// halfway between an unrealistic bid and a defensive ask.</summary>
 internal sealed class WideSpreadRule : IRiskRule
@@ -22,7 +22,7 @@ internal sealed class WideSpreadRule : IRiskRule
 		};
 		var pct = (s * 100m).ToString("F0", CultureInfo.InvariantCulture);
 		var thresholdPct = (Threshold * 100m).ToString("F0", CultureInfo.InvariantCulture);
-		var message = $"Worst leg has a {pct}% bid/ask spread (>{thresholdPct}%); exit cost is dominated by liquidity friction, not fair value.";
+		var message = $"Worst leg has a bid/ask spread {pct}% of its extrinsic value (>{thresholdPct}%); exit cost is dominated by liquidity friction, not fair value.";
 		return new RiskRuleHit(Id, message, inputs);
 	}
 }

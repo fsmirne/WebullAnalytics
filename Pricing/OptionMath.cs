@@ -292,6 +292,19 @@ internal static class OptionMath
 	internal static decimal Intrinsic(decimal underlyingPrice, decimal strike, string callPut) =>
 		callPut == "C" ? Math.Max(0, underlyingPrice - strike) : Math.Max(0, strike - underlyingPrice);
 
+	/// <summary>A two-sided quote's spread as a fraction of the value it actually prices: its extrinsic (mid − intrinsic at
+	/// <paramref name="spot"/>), floored at the smaller of the mid and $1. Intrinsic is known from spot, so a deep-ITM mid carries only
+	/// the extrinsic as information; measured against the whole mid, a spread wider than the extrinsic reads as tight (2026-11-23 pre-open:
+	/// the 12-11 SPY 660C at 65.67/75.70, spot $722.73 — 14% of mid, 126% of its $7.96 extrinsic). Out of the money the extrinsic is the
+	/// mid, so the fraction is spread / mid as before; the $1 floor keeps a European deep-ITM quote (mid below intrinsic) or a nearly
+	/// all-intrinsic one finite. Spread / mid when <paramref name="parsed"/> or a positive <paramref name="spot"/> is unknown.</summary>
+	internal static decimal QuoteSpreadFraction(decimal bid, decimal ask, OptionParsed? parsed, decimal? spot)
+	{
+		var mid = (bid + ask) / 2m;
+		var intrinsic = parsed != null && spot is > 0m ? Intrinsic(spot.Value, parsed.Strike, parsed.CallPut) : 0m;
+		return (ask - bid) / Math.Max(mid - intrinsic, Math.Min(mid, 1.00m));
+	}
+
 	// --- P&L ---
 
 	/// <summary>Calculates P&L for a single option leg at expiration (intrinsic only).</summary>

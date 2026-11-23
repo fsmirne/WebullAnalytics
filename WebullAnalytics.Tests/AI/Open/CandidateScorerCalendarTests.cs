@@ -526,7 +526,7 @@ public class CandidateScorerCalendarTests
 		var cfgAllOff = Cfg();
 		cfgAllOff.MinEntryToNoiseRatio = 0m;
 		cfgAllOff.MinShortExtrinsicToNoiseRatio = 0m;
-		cfgAllOff.Liquidity.MaxFillSpreadPctOfMid = 0m;
+		cfgAllOff.Liquidity.MaxFillSpreadPctOfExtrinsic = 0m;
 		Assert.NotNull(CandidateScorer.ScoreCalendarOrDiagonal(skel, spot: 694.3m, asOf, quotes, bias: 0m, cfgAllOff));
 	}
 
@@ -697,7 +697,7 @@ public class CandidateScorerCalendarTests
 			["763P"] = TestQuote.Q(8.87m, 10.78m),  // 19.4% of mid, $1.91 wide — the real 09:30:00 SPY quote
 			["764P"] = TestQuote.Q(10.00m, 11.67m)  // 15.4% of mid, $1.67 wide
 		};
-		Assert.False(CandidateScorer.PassesFillSpreadGate(symbols, quotes, maxSpreadPctOfMid: 0.12m, minAbsSpreadDollars: 0.50m));
+		Assert.False(CandidateScorer.PassesFillSpreadGate(symbols, quotes, spot: null, maxSpreadPctOfExtrinsic: 0.12m, minAbsSpreadDollars: 0.50m));
 	}
 
 	[Fact]
@@ -710,7 +710,7 @@ public class CandidateScorerCalendarTests
 			["763P"] = TestQuote.Q(8.72m, 9.09m),   // 4.2% of mid
 			["764P"] = TestQuote.Q(11.22m, 11.52m)  // 2.6% of mid
 		};
-		Assert.True(CandidateScorer.PassesFillSpreadGate(symbols, quotes, maxSpreadPctOfMid: 0.12m, minAbsSpreadDollars: 0.50m));
+		Assert.True(CandidateScorer.PassesFillSpreadGate(symbols, quotes, spot: null, maxSpreadPctOfExtrinsic: 0.12m, minAbsSpreadDollars: 0.50m));
 	}
 
 	/// <summary>The AND requirement is what keeps this from rejecting perfectly normal cheap, thin,
@@ -721,7 +721,31 @@ public class CandidateScorerCalendarTests
 	{
 		var symbols = new[] { "cheapleg" };
 		var quotes = new Dictionary<string, OptionContractQuote> { ["cheapleg"] = TestQuote.Q(0.175m, 0.225m) }; // $0.05 wide, 25% of mid
-		Assert.True(CandidateScorer.PassesFillSpreadGate(symbols, quotes, maxSpreadPctOfMid: 0.12m, minAbsSpreadDollars: 0.50m));
+		Assert.True(CandidateScorer.PassesFillSpreadGate(symbols, quotes, spot: null, maxSpreadPctOfExtrinsic: 0.12m, minAbsSpreadDollars: 0.50m));
+	}
+
+	/// <summary>A deep-ITM leg's mid is mostly intrinsic, which spot fixes: its market is measured against the extrinsic it prices. The
+	/// 2026-11-23 pre-open SPY 12-11 660C (spot $722.73) was 14% of mid — under 15%-of-mid gates — but $10.03 wide on $7.96 of extrinsic;
+	/// the same contract quoted $0.30 wide on ~$2.30 of extrinsic is a tradeable market.</summary>
+	[Theory]
+	[InlineData(65.67, 75.70, false)]
+	[InlineData(64.90, 65.20, true)]
+	public void FillSpreadGate_MeasuresADeepItmLegAgainstItsExtrinsic(double bid, double ask, bool expected)
+	{
+		const string sym = "SPY261211C00660000";
+		var quotes = new Dictionary<string, OptionContractQuote> { [sym] = TestQuote.Q((decimal)bid, (decimal)ask) };
+		Assert.Equal(expected, CandidateScorer.PassesFillSpreadGate([sym], quotes, spot: 722.73m, maxSpreadPctOfExtrinsic: 0.12m, minAbsSpreadDollars: 0.50m));
+	}
+
+	[Fact]
+	public void LegLiquidityStats_WorstSpreadIsAFractionOfExtrinsic()
+	{
+		const string sym = "SPY261211C00660000";
+		var quotes = new Dictionary<string, OptionContractQuote> { [sym] = TestQuote.Q(65.67m, 75.70m) };
+		var (worst, _, _) = CandidateScorer.ComputeLegLiquidityStats([sym], quotes, 722.73m);
+		Assert.Equal(10.03m / (70.685m - 62.73m), worst!.Value, 6);
+		var (byMid, _, _) = CandidateScorer.ComputeLegLiquidityStats([sym], quotes, null);   // spot unknown: % of mid
+		Assert.Equal(10.03m / 70.685m, byMid!.Value, 6);
 	}
 
 	[Fact]
@@ -729,7 +753,7 @@ public class CandidateScorerCalendarTests
 	{
 		var symbols = new[] { "763P" };
 		var quotes = new Dictionary<string, OptionContractQuote> { ["763P"] = TestQuote.Q(8.87m, 10.78m) };
-		Assert.True(CandidateScorer.PassesFillSpreadGate(symbols, quotes, maxSpreadPctOfMid: 0m, minAbsSpreadDollars: 0.50m));
+		Assert.True(CandidateScorer.PassesFillSpreadGate(symbols, quotes, spot: null, maxSpreadPctOfExtrinsic: 0m, minAbsSpreadDollars: 0.50m));
 	}
 
 	[Fact]
@@ -737,7 +761,7 @@ public class CandidateScorerCalendarTests
 	{
 		// No two-sided book for either symbol — synthetic-priced legs are not this gate's concern.
 		var symbols = new[] { "A", "B" };
-		Assert.True(CandidateScorer.PassesFillSpreadGate(symbols, new Dictionary<string, OptionContractQuote>(), maxSpreadPctOfMid: 0.12m, minAbsSpreadDollars: 0.50m));
+		Assert.True(CandidateScorer.PassesFillSpreadGate(symbols, new Dictionary<string, OptionContractQuote>(), spot: null, maxSpreadPctOfExtrinsic: 0.12m, minAbsSpreadDollars: 0.50m));
 	}
 
 	[Fact]

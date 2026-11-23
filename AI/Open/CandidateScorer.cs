@@ -485,11 +485,11 @@ internal static class CandidateScorer
 			// PassesFillSpreadGate's doc — distinct from the OI checks above (a liquid-by-OI leg can still
 			// be quoting an unsettled, too-wide-to-trade market, which is exactly what happened at 09:30:00
 			// on the trade that motivated this). Single symbol per call so the failure message can name it.
-			if (!PassesFillSpreadGate(new[] { leg.Symbol }, quotes, cfg.MaxFillSpreadPctOfMid, cfg.MinAbsFillSpreadDollars) && q.Bid is > 0m && q.Ask is > 0m)
+			if (!PassesFillSpreadGate(new[] { leg.Symbol }, quotes, spot, cfg.MaxFillSpreadPctOfExtrinsic, cfg.MinAbsFillSpreadDollars) && q.Bid is > 0m && q.Ask is > 0m)
 			{
 				var spread = q.Ask.Value - q.Bid.Value;
-				var mid = (q.Bid.Value + q.Ask.Value) / 2m;
-				failures.Add($"{leg.Symbol} spread {(mid > 0m ? spread / mid : 0m):P0}>{cfg.MaxFillSpreadPctOfMid:P0} (${spread:F2} wide) — market too wide to trust");
+				var fraction = OptionMath.QuoteSpreadFraction(q.Bid.Value, q.Ask.Value, ParsingHelpers.ParseOptionSymbol(leg.Symbol), spot);
+				failures.Add($"{leg.Symbol} spread {fraction:P0} of extrinsic>{cfg.MaxFillSpreadPctOfExtrinsic:P0} (${spread:F2} wide) — market too wide to trust");
 			}
 
 			// Relative-OI check: leg fails only if the ratio is below the relative threshold AND its
@@ -570,7 +570,7 @@ internal static class CandidateScorer
 	/// debit's SIZE to the spread noise, and $1.03/share cleared that easily against wide-but-not-absurd
 	/// per-leg noise; the market being untrustworthy is a property of the QUOTE, not the debit.
 	///
-	/// <para>Requires BOTH <paramref name="maxSpreadPctOfMid"/> AND <paramref name="minAbsSpreadDollars"/>
+	/// <para>Requires BOTH <paramref name="maxSpreadPctOfExtrinsic"/> AND <paramref name="minAbsSpreadDollars"/>
 	/// to be cleared before rejecting — mirroring <see cref="OpenerQuoteGuardConfig"/>'s torn-NBBO AND —
 	/// so a genuinely cheap, thin, far-OTM leg (a $0.20 option with a nickel-wide $0.05 market: 25% of mid,
 	/// completely normal) isn't rejected on percentage alone. Only a leg that is BOTH wide relative to its
@@ -585,29 +585,31 @@ internal static class CandidateScorer
 	/// honest about what a real order would have achieved, matching the same decision-vs-execution split
 	/// discussed for <see cref="PassesExitNoiseGate"/>.</para>
 	///
-	/// <para>0 or negative <paramref name="maxSpreadPctOfMid"/> disables (legacy behavior, unchanged).</para></summary>
-	internal static bool PassesFillSpreadGate(IEnumerable<string> symbols, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal maxSpreadPctOfMid, decimal minAbsSpreadDollars)
+	/// <para>The percentage is of the leg's extrinsic value (<see cref="OptionMath.QuoteSpreadFraction"/>), not its mid: a deep-ITM leg's mid
+	/// is mostly intrinsic, which spot already fixes, so a market wider than the extrinsic it prices read as tight against the whole mid
+	/// (2026-11-23 pre-open: SPY 12-11 660C 65.67/75.70 — 14% of mid, 126% of its extrinsic). Out of the money the two are the same.
+	/// Without a <paramref name="spot"/> it falls back to the mid.</para>
+	///
+	/// <para>0 or negative <paramref name="maxSpreadPctOfExtrinsic"/> disables (legacy behavior, unchanged).</para></summary>
+	internal static bool PassesFillSpreadGate(IEnumerable<string> symbols, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal? spot, decimal maxSpreadPctOfExtrinsic, decimal minAbsSpreadDollars)
 	{
-		if (maxSpreadPctOfMid <= 0m) return true;
+		if (maxSpreadPctOfExtrinsic <= 0m) return true;
 		foreach (var symbol in symbols)
 		{
 			if (!quotes.TryGetValue(symbol, out var q) || q.Bid is not > 0m || q.Ask is not > 0m) continue;
-			var spread = q.Ask.Value - q.Bid.Value;
-			if (spread < minAbsSpreadDollars) continue; // cheap leg, wide-in-% is normal — not this gate's concern
-			var mid = (q.Bid.Value + q.Ask.Value) / 2m;
-			if (mid <= 0m) continue;
-			if (spread / mid > maxSpreadPctOfMid) return false;
+			if (q.Ask.Value - q.Bid.Value < minAbsSpreadDollars) continue; // cheap leg, wide-in-% is normal — not this gate's concern
+			if (OptionMath.QuoteSpreadFraction(q.Bid.Value, q.Ask.Value, ParsingHelpers.ParseOptionSymbol(symbol), spot) > maxSpreadPctOfExtrinsic) return false;
 		}
 		return true;
 	}
 
-	/// <summary>Worst-leg bid/ask spread (as fraction of mid), minimum effective liquidity across legs,
+	/// <summary>Worst-leg bid/ask spread (as a fraction of the leg's extrinsic value, <see cref="OptionMath.QuoteSpreadFraction"/>), minimum effective liquidity across legs,
 	/// and minimum *relative* liquidity — each leg's effective liquidity as a fraction of the maximum
 	/// among same-expiry strikes within ±10% of spot. "Effective liquidity" is <c>max(OI, volume)</c>:
 	/// a contract with low OI but high intraday volume is being actively traded, which means market
 	/// makers are engaged and exit liquidity is real even if the standing book is thin. Volume falls
 	/// back to OI alone outside market hours (volume = 0 / null). Pass <paramref name="spot"/> = null
-	/// to skip the relative computation.</summary>
+	/// to skip the relative computation (the spread then falls back to a fraction of mid).</summary>
 	public static (decimal? worstSpreadPct, long? minOi, decimal? minRelOi) ComputeLegLiquidityStats(IEnumerable<string> symbols, IReadOnlyDictionary<string, OptionContractQuote> quotes, decimal? spot)
 	{
 		decimal? worstSpread = null;
@@ -616,15 +618,12 @@ internal static class CandidateScorer
 		foreach (var symbol in symbols)
 		{
 			if (!quotes.TryGetValue(symbol, out var q)) continue;
-			if (q.Bid.HasValue && q.Ask.HasValue && q.Ask.Value > 0m)
+			var legParsed = ParsingHelpers.ParseOptionSymbol(symbol);
+			if (q.Bid.HasValue && q.Ask.HasValue && q.Ask.Value > 0m && q.Bid.Value + q.Ask.Value > 0m)
 			{
-				var mid = (q.Bid.Value + q.Ask.Value) / 2m;
-				if (mid > 0m)
-				{
-					var spreadPct = (q.Ask.Value - q.Bid.Value) / mid;
-					if (worstSpread == null || spreadPct > worstSpread.Value)
-						worstSpread = spreadPct;
-				}
+				var spreadPct = OptionMath.QuoteSpreadFraction(q.Bid.Value, q.Ask.Value, legParsed, spot);
+				if (worstSpread == null || spreadPct > worstSpread.Value)
+					worstSpread = spreadPct;
 			}
 			var legLiq = EffectiveLiquidity(q);
 			if (legLiq.HasValue && (minOi == null || legLiq.Value < minOi.Value))
@@ -632,7 +631,6 @@ internal static class CandidateScorer
 
 			if (spot.HasValue && spot.Value > 0m && legLiq.HasValue && legLiq.Value > 0)
 			{
-				var legParsed = ParsingHelpers.ParseOptionSymbol(symbol);
 				if (legParsed != null)
 				{
 					var nearbyMax = FindMaxLiquidityNearStrike(legParsed, quotes, spot.Value);
@@ -685,7 +683,7 @@ internal static class CandidateScorer
 	}
 
 	/// <summary>Worst-leg liquidity penalty. Combines three signals into a multiplicative factor in
-	/// [0.20, 1.00]: bid/ask spread as fraction of mid, absolute open interest, and *relative* OI vs
+	/// [0.20, 1.00]: bid/ask spread as fraction of extrinsic, absolute open interest, and *relative* OI vs
 	/// neighboring strikes at the same expiry. The relative-OI component is what catches sub-grid
 	/// strikes — e.g., a $26.50 strike with OI 67 next to $26 / $27 strikes with OI 1000+ — even when
 	/// the absolute OI clears the floor. Returns null when no signals are available. Weight scales how

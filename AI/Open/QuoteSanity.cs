@@ -76,20 +76,20 @@ internal static class QuoteSanity
 	}
 
 	/// <summary>Reason string when the leg's two-sided quote is TORN, else null. A crossed quote (bid &gt;= ask)
-	/// is always torn. A wide quote is torn only when its spread clears BOTH <paramref name="maxSpreadPctOfMid"/>
-	/// AND <paramref name="minAbsSpread"/> — the AND spares genuinely cheap options (wide in percent but pennies
-	/// in absolute terms). One-sided or absent quotes return null: that is the liquidity gate's concern, not
-	/// integrity. The percent check is disabled when <paramref name="maxSpreadPctOfMid"/> &lt;= 0 (crossed still fires).</summary>
-	public static string? TornReason(OptionContractQuote q, decimal maxSpreadPctOfMid, decimal minAbsSpread)
+	/// is always torn. A wide quote is torn only when its spread clears BOTH <paramref name="maxSpreadPctOfExtrinsic"/>
+	/// of its extrinsic value (<see cref="OptionMath.QuoteSpreadFraction"/> — the mid out of the money, and when
+	/// <paramref name="spot"/> is unknown) AND <paramref name="minAbsSpread"/> — the AND spares genuinely cheap options (wide in percent but
+	/// pennies in absolute terms). One-sided or absent quotes return null: that is the liquidity gate's concern, not
+	/// integrity. The percent check is disabled when <paramref name="maxSpreadPctOfExtrinsic"/> &lt;= 0 (crossed still fires).</summary>
+	public static string? TornReason(string symbol, OptionContractQuote q, decimal? spot, decimal maxSpreadPctOfExtrinsic, decimal minAbsSpread)
 	{
 		if (q.Bid is not { } bid || q.Ask is not { } ask) return null;
 		if (bid <= 0m || ask <= 0m) return null;
 		if (bid >= ask) return $"crossed bid {bid} >= ask {ask}";
 		var spread = ask - bid;
-		var mid = (bid + ask) / 2m;
-		if (maxSpreadPctOfMid > 0m && mid > 0m && spread > minAbsSpread && spread > maxSpreadPctOfMid * mid)
-			return $"wide {bid}/{ask} spread ${spread:0.00} = {spread / mid:P0} of mid";
-		return null;
+		if (maxSpreadPctOfExtrinsic <= 0m || spread <= minAbsSpread) return null;
+		var fraction = OptionMath.QuoteSpreadFraction(bid, ask, ParsingHelpers.ParseOptionSymbol(symbol), spot);
+		return fraction > maxSpreadPctOfExtrinsic ? $"wide {bid}/{ask} spread ${spread:0.00} = {fraction:P0} of extrinsic" : null;
 	}
 
 	/// <summary>Max |parity-implied spot − live spot| / spot before an expiry's book is declared frozen. Healthy books sit within a
@@ -161,12 +161,12 @@ internal static class QuoteSanity
 
 	/// <summary>Torn-NBBO findings for the given <paramref name="legs"/>. Empty when all legs quote cleanly or
 	/// the guard is disabled. Feed staleness is checked separately (once per book) via <see cref="IsFeedStale"/>.</summary>
-	public static IReadOnlyList<QuoteIssue> TornLegs(IEnumerable<ProposalLeg> legs, IReadOnlyDictionary<string, OptionContractQuote> book, OpenerQuoteGuardConfig cfg)
+	public static IReadOnlyList<QuoteIssue> TornLegs(IEnumerable<ProposalLeg> legs, IReadOnlyDictionary<string, OptionContractQuote> book, decimal? spot, OpenerQuoteGuardConfig cfg)
 	{
 		var issues = new List<QuoteIssue>();
 		if (cfg is null || !cfg.Enabled) return issues;
 		foreach (var leg in legs)
-			if (book.TryGetValue(leg.Symbol, out var q) && TornReason(q, cfg.MaxSpreadPctOfMid, cfg.MinAbsSpreadDollars) is { } r)
+			if (book.TryGetValue(leg.Symbol, out var q) && TornReason(leg.Symbol, q, spot, cfg.MaxSpreadPctOfExtrinsic, cfg.MinAbsSpreadDollars) is { } r)
 				issues.Add(new QuoteIssue(QuoteIssueKind.TornNbbo, leg.Symbol, r));
 		return issues;
 	}
@@ -220,7 +220,7 @@ internal static class LiveQuoteGuard
 
 		for (var i = 0; i < proposals.Count; i++)
 		{
-			var torn = QuoteSanity.TornLegs(proposals[i].Legs, book, cfg);
+			var torn = QuoteSanity.TornLegs(proposals[i].Legs, book, proposals[i].Spot, cfg);
 			if (torn.Count > 0)
 			{
 				suspect[i] = "torn NBBO on a leg";

@@ -150,7 +150,7 @@ internal sealed class OpenerAutoExecuteConfig
 	/// unlike the score factor it does not depend on where the trade lands relative to minScoreToOpen.
 	/// Both thresholds default to 0 = off; the guard is submit-independent so watch's dry-run reports the
 	/// skip too, and the proposal is still emitted for display.</summary>
-	/// <remarks>Reject when the worst leg's bid/ask spread as a fraction of mid exceeds this (e.g. 0.25 =
+	/// <remarks>Reject when the worst leg's bid/ask spread as a fraction of its extrinsic value (its mid out of the money) exceeds this (e.g. 0.25 =
 	/// 25%). Exit cost on a wider spread is dominated by liquidity friction, not fair value.</remarks>
 	[JsonPropertyName("maxWorstLegSpreadPct")] public decimal MaxWorstLegSpreadPct { get; set; } = 0m;
 	/// <summary>Reject when the worst leg's open interest is below this fraction of the maximum among
@@ -758,7 +758,7 @@ internal static class AIConfigLoader
 		if (liq.MinOpenInterest < 0) return $"opener.liquidity.minOpenInterest: must be ≥ 0, got {liq.MinOpenInterest}";
 		if (liq.MinRelativeOpenInterest < 0m || liq.MinRelativeOpenInterest > 1m) return $"opener.liquidity.minRelativeOpenInterest: must be in [0, 1], got {liq.MinRelativeOpenInterest}";
 		if (liq.Weight < 0m || liq.Weight > 1m) return $"opener.liquidity.weight: must be in [0, 1], got {liq.Weight}";
-		if (liq.MaxFillSpreadPctOfMid < 0m) return $"opener.liquidity.maxFillSpreadPctOfMid: must be ≥ 0, got {liq.MaxFillSpreadPctOfMid}";
+		if (liq.MaxFillSpreadPctOfExtrinsic < 0m) return $"opener.liquidity.maxFillSpreadPctOfExtrinsic: must be ≥ 0, got {liq.MaxFillSpreadPctOfExtrinsic}";
 		if (liq.MinAbsFillSpreadDollars < 0m) return $"opener.liquidity.minAbsFillSpreadDollars: must be ≥ 0, got {liq.MinAbsFillSpreadDollars}";
 
 		var lc = op.Structures.LongCalendar;
