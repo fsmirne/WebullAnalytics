@@ -75,7 +75,6 @@ internal static class PositionAiResetScanner
 		IReadOnlyDictionary<string, OptionContractQuote> quotes,
 		HistoricalPriceCache priceCache,
 		IntradayBarCache? intradayCache,
-		bool useMarketImpliedIv,
 		CancellationToken cancellation)
 	{
 		if (positionLegs.Count == 0 || !scenarios.Any(s => s.Book != null))
@@ -104,7 +103,7 @@ internal static class PositionAiResetScanner
 			if (sc.Name.StartsWith("Reset to ", StringComparison.Ordinal))
 				continue;
 			if (sc.Book == null) { updated.Add(sc); continue; }
-			var (revalued, addedReturn) = Revalue(sc, origQty, closePnLPerContract, perOrderFriction, s => ScoreCached(scoreCache, s.Legs, quotes, spot, asOf, quoteAsOf, scoringInputs, settings.IvDefault, useMarketImpliedIv));
+			var (revalued, addedReturn) = Revalue(sc, origQty, closePnLPerContract, perOrderFriction, s => ScoreCached(scoreCache, s.Legs, quotes, spot, asOf, quoteAsOf, scoringInputs, settings.IvDefault));
 			// The scale-up adds the existing structure again: it is the baseline the opposite-side adds are judged against, not a candidate.
 			if (addedReturn is decimal r && sc.Book.Any(b => b.Label == "added" && !b.Legs.All(l => existingSymbols.Contains(l.Symbol))))
 				oppositeSideAdds.Add((updated.Count, r));
@@ -312,12 +311,11 @@ internal static class PositionAiResetScanner
 		DateTime asOf,
 		DateTime quoteAsOf,
 		AnalyzeRiskCommand.OpenerScoringInputs scoringInputs,
-		decimal ivDefault,
-		bool useMarketImpliedIv)
+		decimal ivDefault)
 	{
 		var key = string.Join("|", legs.Select(l => $"{l.Action}:{l.Symbol}").Order(StringComparer.Ordinal));
 		if (!cache.TryGetValue(key, out var scored))
-			cache[key] = scored = ScoreLegs(legs, quotes, spot, asOf, quoteAsOf, scoringInputs, ivDefault, useMarketImpliedIv);
+			cache[key] = scored = ScoreLegs(legs, quotes, spot, asOf, quoteAsOf, scoringInputs, ivDefault);
 		return scored;
 	}
 
@@ -328,11 +326,10 @@ internal static class PositionAiResetScanner
 		DateTime asOf,
 		DateTime quoteAsOf,
 		AnalyzeRiskCommand.OpenerScoringInputs scoringInputs,
-		decimal ivDefault,
-		bool useMarketImpliedIv)
+		decimal ivDefault)
 	{
 		var diagLegs = AnalyzeRiskCommand.BuildDiagnosticLegs(legs, quotes, spot, asOf, ivDefault);
-		return AnalyzeRiskCommand.BuildProbe(diagLegs, spot, asOf, quoteAsOf, quotes, scoringInputs, ivDefault, scoreAtCostBasis: false, useMarketImpliedIv).OpenerScore;
+		return AnalyzeRiskCommand.BuildProbe(diagLegs, spot, asOf, quoteAsOf, quotes, scoringInputs, ivDefault, scoreAtCostBasis: false, useMarketImpliedIv: true).OpenerScore;
 	}
 
 	private static decimal EstimateProposalMarginTotal(OpenProposal prop, int qty, decimal spot, IReadOnlyDictionary<string, OptionContractQuote> quotes)

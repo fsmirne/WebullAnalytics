@@ -61,11 +61,12 @@ internal static class TradeComparison
 
 	/// <summary>The scorer's view of one ticker: its spot, the quotes it scores on (re-based to the mid surface like analyze risk), the
 	/// instants it is anchored on and the per-ticker inputs.</summary>
-	private sealed record TickerScoring(decimal Spot, IReadOnlyDictionary<string, OptionContractQuote> Quotes, DateTime AsOf, DateTime QuoteAsOf, AnalyzeRiskCommand.OpenerScoringInputs Inputs, bool UseMarketImpliedIv);
+	private sealed record TickerScoring(decimal Spot, IReadOnlyDictionary<string, OptionContractQuote> Quotes, DateTime AsOf, DateTime QuoteAsOf, AnalyzeRiskCommand.OpenerScoringInputs Inputs);
 
 	/// <summary>Anchors exactly as analyze risk: live = scored as of now on quotes struck at the observation instant, the forming minute bar
-	/// included; a past --date = both at that instant, the forming bar excluded. A --spot override makes the mids stale, so the back-solve is
-	/// skipped and broker IV used. A ticker without a spot or chain gets no scoring (its POP/EV show blank).</summary>
+	/// included; a past --date = both at that instant, the forming bar excluded. A --spot / --extended / --overnight override re-marks the
+	/// board to that spot first (<see cref="AnalyzeCommon.RemarkToSpots"/>), so the scorer reads mids consistent with the spot it scores at.
+	/// A ticker without a spot or chain gets no scoring (its POP/EV show blank).</summary>
 	private static async Task<Dictionary<string, TickerScoring>> LoadScoringAsync(IReadOnlyList<string> tickers, AnalysisOptions opts, GridSettings settings, CancellationToken cancellation)
 	{
 		var scoring = new Dictionary<string, TickerScoring>(StringComparer.OrdinalIgnoreCase);
@@ -74,17 +75,15 @@ internal static class TradeComparison
 		var past = EvaluationDate.IsPast;
 		var asOf = past ? EvaluationDate.Instant!.Value : DateTime.Now;
 		var quoteAsOf = past ? EvaluationDate.Instant!.Value : OptionMath.ObservationInstant();
-		var quotes = (settings.Calibrated || opts.MarksAsOfEvalDate) ? AnalyzeCommon.RecalibrateQuotesToMid(opts.OptionQuotes, opts.UnderlyingPrices, dividends: null, quoteAsOf) : opts.OptionQuotes;
+		var (board, spots) = AnalyzeCommon.RemarkToSpots(opts.OptionQuotes, opts.UnderlyingPrices, opts.UnderlyingPriceOverrides);
+		var quotes = (settings.Calibrated || opts.MarksAsOfEvalDate) ? AnalyzeCommon.RecalibrateQuotesToMid(board, spots, dividends: null, quoteAsOf) : board;
 		var intradayCache = AnalyzeRiskCommand.CreateIntradayCache();
 
 		foreach (var ticker in tickers)
 		{
-			decimal spot = 0m;
-			var hasOverride = opts.UnderlyingPriceOverrides != null && opts.UnderlyingPriceOverrides.TryGetValue(ticker, out spot);
-			var hasSpot = hasOverride || ParsingHelpers.TryResolveForRoot(opts.UnderlyingPrices, ticker, out spot);
-			if (!hasSpot || spot <= 0m) continue;
+			if (!ParsingHelpers.TryResolveForRoot(spots, ticker, out var spot) || spot <= 0m) continue;
 			var inputs = await AnalyzeRiskCommand.LoadOpenerScoringInputsAsync(ticker, asOf, includeCurrentBar: !past, intradayCache, cancellation);
-			scoring[ticker] = new TickerScoring(spot, quotes, asOf, quoteAsOf, inputs, !hasOverride);
+			scoring[ticker] = new TickerScoring(spot, quotes, asOf, quoteAsOf, inputs);
 		}
 		return scoring;
 	}
@@ -97,7 +96,7 @@ internal static class TradeComparison
 		if (scoring == null || legs.Select(l => l.Quantity).Distinct().Count() != 1 || legs.Any(l => !scoring.Quotes.ContainsKey(l.Symbol))) return (null, null, null);
 		var positionLegs = legs.Select(l => new AnalyzePositionCommand.PositionSnapshot(l.Symbol, l.Action, l.Quantity, AnalyzeCommon.ResolvePrice(l, priceQuotes), l.Option!)).ToList();
 		var diagLegs = AnalyzeRiskCommand.BuildDiagnosticLegs(positionLegs, scoring.Quotes, scoring.Spot, scoring.AsOf, AnalyzeRiskSettings.DefaultIvPct);
-		var score = AnalyzeRiskCommand.BuildProbe(diagLegs, scoring.Spot, scoring.AsOf, scoring.QuoteAsOf, scoring.Quotes, scoring.Inputs, AnalyzeRiskSettings.DefaultIvPct, scoreAtCostBasis, scoring.UseMarketImpliedIv).OpenerScore;
+		var score = AnalyzeRiskCommand.BuildProbe(diagLegs, scoring.Spot, scoring.AsOf, scoring.QuoteAsOf, scoring.Quotes, scoring.Inputs, AnalyzeRiskSettings.DefaultIvPct, scoreAtCostBasis, useMarketImpliedIv: true).OpenerScore;
 		var qty = legs[0].Quantity;
 		return (score?.ProbabilityOfProfit, score?.ExpectedValuePerContract * qty, score?.ManagedExpectedValuePerContract * qty);
 	}

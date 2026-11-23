@@ -262,6 +262,9 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 					quotes = merged;
 				}
 			}
+			// Both phases' quotes come off the same book; move it to the evaluation spot once they are merged.
+			if (quotes != null && underlyingPrices != null)
+				(quotes, underlyingPrices) = AnalyzeCommon.RemarkToSpots(quotes, underlyingPrices, spotOverrides);
 		}
 
 		// Risk diagnostic: structured analysis of the current position (greeks, geometry, premium ratio,
@@ -304,9 +307,9 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		// grid prices on — BEFORE the diagnostic, probe score and scenario tables read it. ResolveIV serves
 		// the quote's iv field everywhere downstream, so one pass here aligns the whole command with
 		// 'wa report --calibrated'. Legs whose mid can't back-solve keep the broker IV; explicit --iv
-		// overrides still win (ResolveIV checks them first). Always calibrate against the book's own spot
-		// (underlyingPrices[ticker]), never a --spot / --extended hypothetical override, so the dividend-adjusted
-		// mid->IV solve reflects where the quotes were actually struck.
+		// overrides still win (ResolveIV checks them first). Calibrate against underlyingPrices[ticker]: the spot the
+		// board is struck at — the book's own, or the --spot / --extended / --overnight override it was re-marked to —
+		// so the dividend-adjusted mid->IV solve reflects where the quotes stand.
 		if (quotes != null && (asOfMarket != null || settings.Calibrated))
 		{
 			var bookSpot = asOfMarket?.Spot
@@ -349,10 +352,6 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			technicalBiasForProbe: technicalBias,
 			historicalVolAnnual: historicalVolAnnual,
 			realizedVol: realizedVol,
-			// At hypothetical spots (--spot override, or --extended when the book was frozen at the 16:00 close),
-			// the leg market mids are stale and back-solving IV against the overridden spot produces a nonsense IV
-			// that collapses calendar/diagonal residual time value. Use the quotes' already-calibrated IV instead.
-			useMarketImpliedIv: !hasSpotOverride,
 			sentiment: sentiment,
 			events: positionEvents);
 
@@ -365,7 +364,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			var quoteAsOf = asOfMarket?.Instant ?? OptionMath.ObservationInstant();
 			scenarios = await PositionAiResetScanner.ApplyAsync(
 				scenarios, positionLegs, structure, settings, aiCfg!, spot.Value,
-				asOfNow, quoteAsOf, quotes!, priceCache, intradayCache, !hasSpotOverride, cancellation);
+				asOfNow, quoteAsOf, quotes!, priceCache, intradayCache, cancellation);
 			scenarios = OrderScenariosForDisplay(ShortlistSwept(scenarios, settings.Cash, settings.Risk), settings.Cash, settings.Risk);
 		}
 

@@ -7,7 +7,7 @@ namespace WebullAnalytics.AI;
 
 /// <summary>
 /// Premarket (04:00–09:30 ET) spot correction for the live AI pipeline. Webull's chain endpoint reports the underlying's prior-session close until the RTH bell — the SPX-family cash indexes simply are not computed off-hours —
-/// so premarket scan/regime reads scored against a spot that ignored the whole overnight move. This helper replaces that stale spot with the freshest premarket estimate available and re-bases the chain's mid-implied IVs against it:
+/// so premarket scan/regime reads scored against a spot that ignored the whole overnight move. This helper replaces that stale spot with the freshest premarket estimate available and moves the chain onto it — a live book's mid-implied IVs are re-based against it; a frozen book is re-marked to it (sticky-strike IV, <see cref="Pricing.QuoteRemark"/>):
 ///   1. put-call parity on the ATM straddle of the fetched chain, bid/ask mids only (XSP/SPXW trade a global session until 09:15 ET, so their premarket quotes are live and parity yields the spot the option market is actually pricing);
 ///   2. fallback: the latest extended-hours minute bar (for the SPX family the fetcher merges SPY premarket bars rescaled to the ticker's level, so this is the SPY-converted spot; for equities it is the ticker's own premarket tape).
 /// No-op outside the premarket window, on non-trading days, and when neither source yields a price. Explicit --spot / --premarket flags run after this and win.
@@ -59,6 +59,7 @@ internal static class PremarketSpotOverride
 		var barClose = await LatestExtendedBarCloseAsync(ticker, now, cancellation);
 
 		decimal? fresh = null;
+		decimal? frozenBookSpot = null; // set when the quotes are stale: the spot they are struck at, to re-mark from
 		var source = "";
 		if (parity is { Spot: > 0m } p && barClose is decimal bar and > 0m)
 		{
@@ -70,8 +71,9 @@ internal static class PremarketSpotOverride
 			else
 			{
 				fresh = bar;
+				frozenBookSpot = p.Spot;
 				source = "premarket bar";
-				AnsiConsole.MarkupLine($"[yellow]premarket: {Markup.Escape(ticker)} chain books look frozen (parity ${p.Spot:N2} vs premarket bar ${bar:N2}) — using the bar spot. The option quotes themselves are likely stale on this source; treat premarket rankings as indicative only.[/]");
+				AnsiConsole.MarkupLine($"[yellow]premarket: {Markup.Escape(ticker)} chain books look frozen (parity ${p.Spot:N2} vs premarket bar ${bar:N2}) — using the bar spot and re-marking the quotes to it (sticky-strike IV). The option quotes themselves are stale on this source; treat premarket rankings as indicative only.[/]");
 			}
 		}
 		else if (parity is { Spot: > 0m } pOnly)
@@ -82,6 +84,8 @@ internal static class PremarketSpotOverride
 		else if (barClose is decimal barOnly and > 0m)
 		{
 			fresh = barOnly;
+			// No two-sided call/put pair to read the book from: nothing shows it live, so treat it as struck at the chain's reported spot.
+			frozenBookSpot = chainSpot > 0m ? chainSpot : null;
 			source = "premarket bar";
 		}
 
@@ -89,7 +93,12 @@ internal static class PremarketSpotOverride
 			return ReferenceEquals(options, snapshot.Options) ? snapshot : new QuoteSnapshot(options, underlyings); // nothing fresher than the chain's prior close — keep it, but keep the bootstrapped chain
 
 		underlyings[ticker] = spot;
-		options = LiveQuoteSource.RebaseIvForSpot(options, ticker, spot, now);
+		// A live book's mids already price the fresh spot — only its IVs, back-solved at fetch against the chain's stale spot, need
+		// re-basing. A frozen book's mids are the prior print's: re-solving them at the fresh spot yields nonsense IVs, so the board is
+		// instead re-marked from the spot it is struck at, holding each contract's vol.
+		options = frozenBookSpot is decimal book
+			? Pricing.QuoteRemark.StickyStrike(options, ticker, book, spot, out _)
+			: LiveQuoteSource.RebaseIvForSpot(options, ticker, spot, now);
 		AnsiConsole.MarkupLine($"[dim]premarket spot: {Markup.Escape(ticker)} ${spot:N2} ({Markup.Escape(source)}; chain reported ${chainSpot:N2})[/]");
 		return new QuoteSnapshot(options, underlyings);
 	}

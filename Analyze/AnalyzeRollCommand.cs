@@ -1056,6 +1056,7 @@ internal sealed class AnalyzeRollCommand : AsyncCommand<AnalyzeRollSettings>
 		var hasSpotOverride = spotOverrides != null && ParsingHelpers.TryResolveForRoot(spotOverrides, ticker, out ovr);
 		if (hasSpotOverride) spot = ovr;
 		if (spot <= 0m) { Console.Error.WriteLine($"Error: Could not determine underlying price for {ticker}."); return 1; }
+		(quotes, underlyingPrices) = AnalyzeCommon.RemarkToSpots(quotes, underlyingPrices, spotOverrides);
 
 		var asOf = EvaluationDate.IsPast ? EvaluationDate.Instant!.Value : DateTime.Now;
 		var quoteAsOf = EvaluationDate.IsPast ? EvaluationDate.Instant!.Value : OptionMath.ObservationInstant();
@@ -1119,7 +1120,6 @@ internal sealed class AnalyzeRollCommand : AsyncCommand<AnalyzeRollSettings>
 			scoringInputs: scoringInputs,
 			asOf: asOf,
 			quoteAsOf: quoteAsOf,
-			useMarketImpliedIv: !hasSpotOverride,
 			baseTime: baseTime,
 			closeLookup: closeLookup,
 			range: settings.Range,
@@ -1176,8 +1176,7 @@ internal sealed class AnalyzeRollCommand : AsyncCommand<AnalyzeRollSettings>
 				scoringInputs: scoringInputs,
 				asOf: asOf,
 				quoteAsOf: quoteAsOf,
-				useMarketImpliedIv: !hasSpotOverride,
-				baseTime: baseTime,
+					baseTime: baseTime,
 				closeLookup: closeLookup,
 				range: settings.Range,
 				terminalWidth: console.Profile.Width));
@@ -1299,7 +1298,6 @@ internal sealed class AnalyzeRollCommand : AsyncCommand<AnalyzeRollSettings>
 		AnalyzeRiskCommand.OpenerScoringInputs scoringInputs,
 		DateTime asOf,
 		DateTime quoteAsOf,
-		bool useMarketImpliedIv,
 		DateTime baseTime,
 		Func<string, DateTime, decimal?> closeLookup,
 		decimal range,
@@ -1367,7 +1365,7 @@ internal sealed class AnalyzeRollCommand : AsyncCommand<AnalyzeRollSettings>
 			}).ToList();
 
 			var diagLegs = AnalyzeRiskCommand.BuildDiagnosticLegs(snapshots, quotes, spot, asOf, AnalyzeRiskSettings.DefaultIvPct);
-			var probe = AnalyzeRiskCommand.BuildProbe(diagLegs, spot, asOf, quoteAsOf, quotes, scoringInputs, AnalyzeRiskSettings.DefaultIvPct, scoreAtCostBasis: false, useMarketImpliedIv);
+			var probe = AnalyzeRiskCommand.BuildProbe(diagLegs, spot, asOf, quoteAsOf, quotes, scoringInputs, AnalyzeRiskSettings.DefaultIvPct, scoreAtCostBasis: false, useMarketImpliedIv: true);
 			if (probe.OpenerScore is { } score)
 			{
 				var qty = optionLegs[0].Qty;

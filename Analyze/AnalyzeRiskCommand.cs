@@ -152,6 +152,8 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 			Console.Error.WriteLine($"Error: no underlying price for '{ticker}'. Pass --spot {ticker}:<price> or run 'wa sniff' to refresh Webull headers.");
 			return 1;
 		}
+		if (underlyingPrices != null)
+			(quotes, underlyingPrices) = AnalyzeCommon.RemarkToSpots(quotes, underlyingPrices, spotOverrides);
 
 		// Sync the risk-free rate with what RunReportPipeline (analyze trade) uses so both commands calibrate
 		// the long-leg IV against the same rate; a stale default here produces a different calibrated IV,
@@ -166,20 +168,20 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 		var now = DateTime.Now;
 		var quoteAsOf = OptionMath.ObservationInstant();
 
-		// Re-base IV to the live mid surface (default; --calibrated false shows raw vendor IV for debugging).
-		// Always recalibrate against underlyingPrices (the book's own spot), never a hypothetical --spot / --extended / --overnight override.
+		// Re-base IV to the live mid surface (default; --calibrated false shows raw vendor IV for debugging), against underlyingPrices:
+		// the spot the board is struck at — the book's own, or the --spot / --extended / --overnight override it was re-marked to.
 		if (settings.Calibrated && underlyingPrices != null)
 			quotes = AnalyzeCommon.RecalibrateQuotesToMid(quotes, underlyingPrices, dividends: null, quoteAsOf);
 
 		var trend = await TrendFetcher.FetchAsync(ticker, now, cancellation);
-		var riskContext = new RiskContext(now, quoteAsOf, trend, IncludeCurrentBar: true, ScoreAtCostBasis: false, Mode: "analyze_risk", HasSpotOverride: hasSpotOverride);
+		var riskContext = new RiskContext(now, quoteAsOf, trend, IncludeCurrentBar: true, ScoreAtCostBasis: false, Mode: "analyze_risk");
 		return await EvaluateAndRenderAsync(settings, parsedLegs, quotes, spot.Value, riskContext, CreateIntradayCache(), cancellation);
 	}
 
 	/// <summary>How one risk evaluation is anchored. Live: <see cref="AsOf"/> = now, <see cref="QuoteAsOf"/> = when
 	/// the live quotes were struck, the forming minute bar included (it is real data now). Fill: both = the fill
 	/// instant, the forming bar excluded (its close lies after the fill), scored at the fill's cost basis.</summary>
-	private sealed record RiskContext(DateTime AsOf, DateTime QuoteAsOf, TrendSnapshot? Trend, bool IncludeCurrentBar, bool ScoreAtCostBasis, string Mode, bool HasSpotOverride = false);
+	private sealed record RiskContext(DateTime AsOf, DateTime QuoteAsOf, TrendSnapshot? Trend, bool IncludeCurrentBar, bool ScoreAtCostBasis, string Mode);
 
 	internal static IntradayBarCache? CreateIntradayCache()
 	{
@@ -247,15 +249,11 @@ internal sealed class AnalyzeRiskCommand : AsyncCommand<AnalyzeRiskSettings>
 		var inputs = await LoadOpenerScoringInputsAsync(ticker, asOf, context.IncludeCurrentBar, intradayCache, cancellation);
 		var diagLegs = BuildDiagnosticLegs(positionLegs, quotes, spot, asOf, settings.IvDefault);
 		var diagnostic = RiskDiagnosticBuilder.Build(diagLegs, spot, quoteAsOf, sym => ResolveIv(quotes, sym, settings.IvDefault), trend, quotes, inputs.Sentiment);
-		// At hypothetical spots (--spot / --extended / --overnight override when the book was frozen at the 16:00 close),
-		// the leg market mids are stale and back-solving IV against the overridden spot produces a nonsense IV.
-		// Use the quotes' already-normalized IV in that case for an internally-consistent projection.
-		var useMarketImpliedIv = !context.HasSpotOverride;
 		// A spec is a hypothetical new trade: score it at the real bid/ask (cost-basis mode would suppress
 		// useMarketImpliedIv and use broker IV, diverging from the scan). A fill is a trade that HAPPENED: score
 		// it at what was paid — cost-basis mode — whose IV comes from the quotes' IV field, already
 		// recalibrated to the fill-time mid surface.
-		var probe = BuildProbe(diagLegs, spot, asOf, quoteAsOf, quotes, inputs, settings.IvDefault, context.ScoreAtCostBasis, useMarketImpliedIv);
+		var probe = BuildProbe(diagLegs, spot, asOf, quoteAsOf, quotes, inputs, settings.IvDefault, context.ScoreAtCostBasis, useMarketImpliedIv: true);
 		diagnostic = diagnostic with { Probe = probe };
 
 		var logPath = Program.ResolvePath("data/analyze-risk.jsonl");

@@ -330,12 +330,57 @@ internal static class AnalyzeCommon
 			OptionMath.LiveQuotesStruckAt = WebullOptionsClient.LastFetchHadLivePremarketBook
 				? MarketTime.EtToInstant(MarketTime.NowEt())
 				: null;
-			// The Schwab branch normalizes inside LiveQuoteSource; this direct Webull fetch gets the same clock-consistent IVs here.
-			quotes = LiveQuoteSource.NormalizeIvs(quotes, underlyings);
 		}
 
+		underlyings = BookSpots(quotes, underlyings, MarketTime.NowEt());
+		// Clock-consistent IVs against the book's own spot. The Schwab branch already normalized inside LiveQuoteSource against the
+		// vendor spot; normalizing is idempotent (it always solves from the mid, else the preserved vendor IV), so re-running it here
+		// re-bases those IVs too when BookSpots moved the spot.
+		quotes = LiveQuoteSource.NormalizeIvs(quotes, underlyings);
 		quotes = await ApplyRealizedVolAsync(quotes, cancellation);
 		return (quotes, underlyings);
+	}
+
+	/// <summary>The spot each root's option book is actually struck at. During RTH that is the vendor's live spot. Outside it the book
+	/// is either frozen at its last print — which is neither the 16:00 equity close nor the post-market last (SPY's options trade to
+	/// 16:15; on 2026-11-20 the frozen book's parity sat at 693.26 between the 689.81 close Webull reports and the 697.48 post-market
+	/// last Schwab reports) — or live in a global session; either way its own put-call parity is the spot it prices. Roots whose chain
+	/// has no two-sided call/put pair keep the vendor spot.</summary>
+	internal static IReadOnlyDictionary<string, decimal> BookSpots(IReadOnlyDictionary<string, OptionContractQuote> quotes, IReadOnlyDictionary<string, decimal> vendorSpots, DateTime nowEt)
+	{
+		if (SchwabOptionsClient.IsRegularTradingHours(nowEt) || vendorSpots.Count == 0) return vendorSpots;
+		var result = new Dictionary<string, decimal>(vendorSpots, StringComparer.OrdinalIgnoreCase);
+		foreach (var root in vendorSpots.Keys)
+		{
+			var parityRoot = string.Equals(root, "SPX", StringComparison.OrdinalIgnoreCase) ? "SPXW" : root;
+			if (AI.PremarketSpotOverride.DeriveSpotFromParity(parityRoot, quotes, OptionMath.RiskFreeRate, nowEt, allowLastPrice: false) is { Spot: > 0m } parity)
+				result[root] = Math.Round(parity.Spot, 2);
+		}
+		return result;
+	}
+
+	/// <summary>Moves the board to the spot each run evaluates at: every root in <paramref name="overrides"/> (--spot / --extended /
+	/// --overnight) is re-marked sticky-strike (<see cref="QuoteRemark.StickyStrike"/>) from the spot its book is struck at
+	/// (<paramref name="bookSpots"/>) to the override. Returns the re-marked quotes and the spot map they are now consistent with
+	/// (book spots with the overrides applied), so downstream code treats the result as a book struck at the evaluation spot —
+	/// mids, IV back-solves and theoretical prices all agree on it.</summary>
+	internal static (IReadOnlyDictionary<string, OptionContractQuote> Quotes, IReadOnlyDictionary<string, decimal> Spots) RemarkToSpots(
+		IReadOnlyDictionary<string, OptionContractQuote> quotes,
+		IReadOnlyDictionary<string, decimal> bookSpots,
+		IReadOnlyDictionary<string, decimal>? overrides)
+	{
+		if (overrides == null || overrides.Count == 0) return (quotes, bookSpots);
+		var spots = new Dictionary<string, decimal>(bookSpots, StringComparer.OrdinalIgnoreCase);
+		foreach (var (root, target) in overrides)
+		{
+			if (!ParsingHelpers.TryResolveForRoot(bookSpots, root, out var book) || book <= 0m || target <= 0m) { spots[root] = target; continue; }
+			spots[root] = target;
+			if (book == target) continue;
+			quotes = QuoteRemark.StickyStrike(quotes, root, book, target, out var unpriced);
+			var note = unpriced > 0 ? $"; {unpriced} quote(s) with no IV left as quoted" : "";
+			AnsiConsole.MarkupLine($"[dim]{Markup.Escape(root)}: option quotes re-marked from the book's ${book:N2} to ${target:N2} (sticky-strike IV){Markup.Escape(note)}.[/]");
+		}
+		return (quotes, spots);
 	}
 
 	/// <summary>Merges explicit <c>--spot</c> entries with the live <paramref name="session"/>'s prices (<c>--extended</c> /
