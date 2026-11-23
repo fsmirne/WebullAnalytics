@@ -1150,7 +1150,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			(shortParsed.Strike, shortExp, ivShort, false, callPut),
 		};
 		var evPerShare = ExpectedPositionValuePerShare(longLeg.Parsed.Root, legsForEv, shortExp, asOf, spot, ivShort, dividends);
-		var breakEvens = ComputeScenarioBreakEvens(longLeg.Parsed.Root, legsForEv, shortExp, spot, longLeg.CostBasis - shortMid, dividends);
+		var breakEvenBooks = new BreakEvenBooks(longLeg.Parsed.Root, shortExp, spot, legsForEv, longLeg.CostBasis - shortMid,
+			[(longLeg.Parsed.Strike, longLeg.Parsed.ExpiryDate, ivLong, true, callPut)], longLeg.CostBasis, dividends);
 		var margin = MarginCalculator.PairPerContract(shortParsed, shortMid, longLeg.Parsed, spot);
 		var shape = PairShapeLabel(shortParsed, longLeg.Parsed);
 		var floorNote = shortExp.Date == longLeg.Parsed.ExpiryDate.Date
@@ -1169,7 +1170,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			isLegIn: true,
 			newExpectedPerShare: evPerShare,
 			unchangedExpectedPerShare: holdEvPerShare,
-			breakEvens: breakEvens,
+			breakEvenBooks: breakEvenBooks,
 			resultingLegs: [.. UnitLegs([longLeg]), UnitLeg(shortSymbol, LegAction.Sell, shortMid, shortParsed)],
 			resultLabel: shape,
 			evNote: $"EV ${evPerShare:F2}/share at {shortExp:MM-dd}");
@@ -1221,6 +1222,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		var shortAtExpiry = OptionMath.Intrinsic(spot, shortLeg.Parsed.Strike, callPut);
 		var holdNetPerShare = longAtExpiry - shortAtExpiry;
 		var strikeOffset = longLeg.Parsed.Strike - shortLeg.Parsed.Strike;
+		var initialDebitPerShare = longLeg.CostBasis - shortLeg.CostBasis;
+		List<(decimal, DateTime, decimal, bool, string)> existingLegsForEv = [(longLeg.Parsed.Strike, longLeg.Parsed.ExpiryDate, ivLong, true, callPut), (shortLeg.Parsed.Strike, expiry, ivShort, false, callPut)];
 
 		list.Add(NewScenarioSpread("Hold to expiry", legs, "—",
 			cashNow: 0m, valueAtTarget: holdNetPerShare, marginDeltaPerContract: 0m, daysToTarget: expiryDte,
@@ -1275,7 +1278,9 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				marginPerContract: sameExpMarginDelta,
 				daysToTarget: expiryDte,
 				rationale: $"shift short to ${newStrike:F2}, keep {expiry:MM-dd} expiry; mid net ${cashPerShareSameExp:+0.00;-0.00}/share; at expiry: ${projSameExpPerShare:F2}",
-				isRoll: true);
+				isRoll: true,
+				breakEvenBooks: new BreakEvenBooks(shortLeg.Parsed.Root, expiry, spot, [(longLeg.Parsed.Strike, longLeg.Parsed.ExpiryDate, ivLong, true, callPut), (newStrike, expiry, ivSameExp, false, callPut)],
+					initialDebitPerShare - cashPerShareSameExp, existingLegsForEv, initialDebitPerShare, dividends));
 		}
 
 		var width = Math.Abs(longLeg.Parsed.Strike - shortLeg.Parsed.Strike);
@@ -1368,7 +1373,9 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				marginPerContract: marginDelta,
 				daysToTarget: dteNew,
 				rationale: $"close net ${closeNet:+0.00;-0.00}, open next-week vertical net ${openNet:+0.00;-0.00} at mid; projected at {newExpiry:MM-dd}: ${newProjectedPerShare:F2}",
-				isRoll: true);
+				isRoll: true,
+				breakEvenBooks: new BreakEvenBooks(shortLeg.Parsed.Root, newExpiry, spot, [(newLongStrike, newExpiry, ivNewLong, true, callPut), (newStrike, newExpiry, ivNewShort, false, callPut)],
+					initialDebitPerShare - cashPerShare, existingLegsForEv, initialDebitPerShare, dividends));
 		}
 
 		return OrderScenariosForDisplay(list
@@ -1494,7 +1501,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 					(candStrike, candExp, ivNewShort, false, callPut),
 				};
 				var newEvPerShare = ExpectedPositionValuePerShare(shortLeg.Parsed.Root, newLegsForEv, candExp, asOf, spot, ivNewShort, dividends);
-				var newBreakEvens = ComputeScenarioBreakEvens(shortLeg.Parsed.Root, newLegsForEv, candExp, spot, initialDebitPerShare - cashPerShare, dividends);
+				var breakEvenBooks = new BreakEvenBooks(shortLeg.Parsed.Root, candExp, spot, newLegsForEv, initialDebitPerShare - cashPerShare, existingLegsForEv, initialDebitPerShare, dividends);
 
 				var newMargin = MarginCalculator.PairPerContract(cand.Parsed, newShortMidExec, longLeg.Parsed, spot);
 				var marginDelta = newMargin - currentMargin;
@@ -1516,7 +1523,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 					peakCashPerContract: peakCash,
 					newExpectedPerShare: newEvPerShare,
 					unchangedExpectedPerShare: holdEvPerShare,
-					breakEvens: newBreakEvens,
+					breakEvenBooks: breakEvenBooks,
 					resultingLegs: [UnitLeg(longLeg.Symbol, LegAction.Buy, longMidNow, longLeg.Parsed), UnitLeg(cand.Symbol, LegAction.Sell, newShortMidExec, cand.Parsed)],
 					evNote: $"EV ${newEvPerShare:F2}/share at {candExp:MM-dd}");
 			}
@@ -1542,7 +1549,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 					var longAtNewShortExp = LongValueAt(longLeg.Parsed, ivLong, newExp, spot, dividends);
 					var shortAtNewShortExp = OptionMath.Intrinsic(spot, shortLeg.Parsed.Strike, callPut);
 					var newProjectedPerShare = longAtNewShortExp - shortAtNewShortExp;
-					var newEvPerShare = ExpectedPositionValuePerShare(shortLeg.Parsed.Root, [(longLeg.Parsed.Strike, longLeg.Parsed.ExpiryDate, ivLong, true, callPut), (shortLeg.Parsed.Strike, newExp, ivNewShort, false, callPut)], newExp, asOf, spot, ivNewShort, dividends);
+					List<(decimal, DateTime, decimal, bool, string)> newLegsForEv = [(longLeg.Parsed.Strike, longLeg.Parsed.ExpiryDate, ivLong, true, callPut), (shortLeg.Parsed.Strike, newExp, ivNewShort, false, callPut)];
+					var newEvPerShare = ExpectedPositionValuePerShare(shortLeg.Parsed.Root, newLegsForEv, newExp, asOf, spot, ivNewShort, dividends);
 					var newShortParsed = new OptionParsed(shortLeg.Parsed.Root, newExp, callPut, shortLeg.Parsed.Strike);
 					var newMargin = MarginCalculator.PairPerContract(newShortParsed, newShortMidExec, longLeg.Parsed, spot);
 					var marginDelta = newMargin - currentMargin;
@@ -1558,6 +1566,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 						isRoll: true,
 						newExpectedPerShare: newEvPerShare,
 						unchangedExpectedPerShare: holdEvPerShare,
+						breakEvenBooks: new BreakEvenBooks(shortLeg.Parsed.Root, newExp, spot, newLegsForEv, initialDebitPerShare - cashPerShare, existingLegsForEv, initialDebitPerShare, dividends),
 						resultingLegs: [UnitLeg(longLeg.Symbol, LegAction.Buy, longMidNow, longLeg.Parsed), UnitLeg(newSym, LegAction.Sell, newShortMidExec, newShortParsed)],
 						evNote: $"EV ${newEvPerShare:F2}/share");
 				}
@@ -1578,7 +1587,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				var longAtOrigExp = LongValueAt(longLeg.Parsed, ivLong, shortLeg.Parsed.ExpiryDate, spot, dividends);
 				var newShortIntrinsicAtExp = OptionMath.Intrinsic(spot, newStrike, callPut);
 				var projSameExpPerShare = longAtOrigExp - newShortIntrinsicAtExp;
-				var evSameExpPerShare = ExpectedPositionValuePerShare(shortLeg.Parsed.Root, [(longLeg.Parsed.Strike, longLeg.Parsed.ExpiryDate, ivLong, true, callPut), (newStrike, shortLeg.Parsed.ExpiryDate, ivSameExp, false, callPut)], shortLeg.Parsed.ExpiryDate, asOf, spot, ivSameExp, dividends);
+				List<(decimal, DateTime, decimal, bool, string)> sameExpLegsForEv = [(longLeg.Parsed.Strike, longLeg.Parsed.ExpiryDate, ivLong, true, callPut), (newStrike, shortLeg.Parsed.ExpiryDate, ivSameExp, false, callPut)];
+				var evSameExpPerShare = ExpectedPositionValuePerShare(shortLeg.Parsed.Root, sameExpLegsForEv, shortLeg.Parsed.ExpiryDate, asOf, spot, ivSameExp, dividends);
 				var sameExpShortParsed = new OptionParsed(shortLeg.Parsed.Root, shortLeg.Parsed.ExpiryDate, callPut, newStrike);
 				var sameExpMargin = MarginCalculator.PairPerContract(sameExpShortParsed, newShortMidSameExp, longLeg.Parsed, spot);
 				var sameExpMarginDelta = sameExpMargin - currentMargin;
@@ -1596,6 +1606,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 					isRoll: true,
 					newExpectedPerShare: evSameExpPerShare,
 					unchangedExpectedPerShare: holdEvPerShare,
+					breakEvenBooks: new BreakEvenBooks(shortLeg.Parsed.Root, shortLeg.Parsed.ExpiryDate, spot, sameExpLegsForEv, initialDebitPerShare - cashPerShareSameExp, existingLegsForEv, initialDebitPerShare, dividends),
 					resultingLegs: [UnitLeg(longLeg.Symbol, LegAction.Buy, longMidNow, longLeg.Parsed), UnitLeg(sameExpSym, LegAction.Sell, newShortMidSameExp, sameExpShortParsed)],
 					evNote: $"EV ${evSameExpPerShare:F2}/share");
 			}
@@ -1614,7 +1625,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				var longAtNewShortExp = LongValueAt(longLeg.Parsed, ivLong, newExp, spot, dividends);
 				var shortAtNewShortExp = OptionMath.Intrinsic(spot, newStrike, callPut);
 				var newProjectedPerShare = longAtNewShortExp - shortAtNewShortExp;
-				var newEvPerShare = ExpectedPositionValuePerShare(shortLeg.Parsed.Root, [(longLeg.Parsed.Strike, longLeg.Parsed.ExpiryDate, ivLong, true, callPut), (newStrike, newExp, ivNewShort, false, callPut)], newExp, asOf, spot, ivNewShort, dividends);
+				List<(decimal, DateTime, decimal, bool, string)> newLegsForEv = [(longLeg.Parsed.Strike, longLeg.Parsed.ExpiryDate, ivLong, true, callPut), (newStrike, newExp, ivNewShort, false, callPut)];
+				var newEvPerShare = ExpectedPositionValuePerShare(shortLeg.Parsed.Root, newLegsForEv, newExp, asOf, spot, ivNewShort, dividends);
 				var newShortParsed = new OptionParsed(shortLeg.Parsed.Root, newExp, callPut, newStrike);
 				var newMargin = MarginCalculator.PairPerContract(newShortParsed, newShortMidExec, longLeg.Parsed, spot);
 				var marginDelta = newMargin - currentMargin;
@@ -1633,6 +1645,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 					peakCashPerContract: shortMidNow * 100m,
 					newExpectedPerShare: newEvPerShare,
 					unchangedExpectedPerShare: holdEvPerShare,
+					breakEvenBooks: new BreakEvenBooks(shortLeg.Parsed.Root, newExp, spot, newLegsForEv, initialDebitPerShare - cashPerShare, existingLegsForEv, initialDebitPerShare, dividends),
 					resultingLegs: [UnitLeg(longLeg.Symbol, LegAction.Buy, longMidNow, longLeg.Parsed), UnitLeg(newSym, LegAction.Sell, newShortMidExec, newShortParsed)],
 					evNote: $"EV ${newEvPerShare:F2}/share");
 			}
@@ -1667,7 +1680,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 					(newStrike, newShortExp, ivNewShort, false, callPut)
 				};
 				var resetEvPerShare = ExpectedPositionValuePerShare(shortLeg.Parsed.Root, resetLegsForEv, newShortExp, asOf, spot, ivNewShort, dividends);
-				var resetBreakEvens = ComputeScenarioBreakEvens(shortLeg.Parsed.Root, resetLegsForEv, newShortExp, spot, initialDebitPerShare - cashPerShare, dividends);
+				var breakEvenBooks = new BreakEvenBooks(shortLeg.Parsed.Root, newShortExp, spot, resetLegsForEv, initialDebitPerShare - cashPerShare, existingLegsForEv, initialDebitPerShare, dividends);
 				var newShortParsed = new OptionParsed(shortLeg.Parsed.Root, newShortExp, callPut, newStrike);
 				var newLongParsed = new OptionParsed(longLeg.Parsed.Root, newLongExp, callPut, newStrike);
 				var newMargin = MarginCalculator.PairPerContract(newShortParsed, newShortMidExec, newLongParsed, spot);
@@ -1685,7 +1698,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 					isRoll: true,
 					newExpectedPerShare: resetEvPerShare,
 					unchangedExpectedPerShare: holdEvPerShare,
-					breakEvens: resetBreakEvens,
+					breakEvenBooks: breakEvenBooks,
 					resultingLegs: [UnitLeg(newLongSym, LegAction.Buy, newLongMidExec, newLongParsed), UnitLeg(newShortSym, LegAction.Sell, newShortMidExec, newShortParsed)],
 					evNote: $"EV ${resetEvPerShare:F2}/share");
 			}
@@ -1954,7 +1967,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		decimal peakCashPerContract = 0m,
 		decimal? newExpectedPerShare = null,
 		decimal? unchangedExpectedPerShare = null,
-		IReadOnlyList<decimal>? breakEvens = null,
+		BreakEvenBooks? breakEvenBooks = null,
 		IReadOnlyList<PositionSnapshot>? resultingLegs = null,
 		string? evNote = null,
 		bool isLegIn = false,
@@ -1994,7 +2007,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				IsRoll: isRoll,
 				ExpectedPnLPerContract: fullEvPerContract,
 				PeakCashPerContract: peakCashPerContract,
-				BreakEvens: breakEvens,
+				BreakEvens: breakEvenBooks?.At(1m),
 				Book: resultingLegs == null ? null : [new BookStructure(resultLabel, resultingLegs, fullQty)],
 				EvNote: evNote,
 				OrderContractsNow: ordersPerContract * fullQty,
@@ -2025,6 +2038,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			IsRoll: isRoll,
 			ExpectedPnLPerContract: partialEvPerContract,
 			PeakCashPerContract: peakCashPerContract * maxPartial / fullQty,
+			BreakEvens: breakEvenBooks?.At((decimal)maxPartial / fullQty),
 			Book: resultingLegs == null ? null : [new BookStructure(resultLabel, resultingLegs, maxPartial), new BookStructure("existing", UnitLegs(legs), fullQty - maxPartial)],
 			EvNote: evNote,
 			OrderContractsNow: ordersPerContract * maxPartial,
@@ -2254,27 +2268,44 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		DateTime target,
 		decimal spot,
 		decimal netCostBasisPerShare,
-		IReadOnlyList<DividendEvent>? dividends = null)
+		IReadOnlyList<DividendEvent>? dividends = null) =>
+		ComputeBreakEvens(root, [(legs, netCostBasisPerShare, 1m)], target, spot, dividends);
+
+	/// <summary>Break-even spot price(s) at <paramref name="target"/> of a position made of several books, each a leg set with its net cost
+	/// basis per share, weighted by the fraction of the position's contracts it holds — a partial change is the changed book on some
+	/// contracts and the unchanged one on the rest. Legs expiring by the target settle to intrinsic, the rest are Black-Scholes-valued.</summary>
+	internal static List<decimal> ComputeBreakEvens(
+		string root,
+		IReadOnlyList<(IReadOnlyList<(decimal strike, DateTime expiry, decimal iv, bool isLong, string cp)> Legs, decimal BasisPerShare, decimal Weight)> books,
+		DateTime target,
+		decimal spot,
+		IReadOnlyList<DividendEvent>? dividends)
 	{
-		if (legs.Count == 0 || spot <= 0m) return [];
+		var allLegs = books.SelectMany(b => b.Legs).ToList();
+		if (allLegs.Count == 0 || spot <= 0m) return [];
 		var targetClose = target.Date + OptionMath.MarketClose;
 		decimal PnlAt(decimal s)
 		{
-			decimal val = 0m;
-			foreach (var (strike, expiry, iv, isLong, cp) in legs)
+			decimal pnl = 0m;
+			foreach (var (legs, basis, weight) in books)
 			{
-				decimal legVal = expiry.Date <= target.Date
-					? OptionMath.Intrinsic(s, strike, cp)
-					: (decimal)OptionMath.BlackScholes(
-						OptionMath.DividendAdjustedSpot(s, dividends, targetClose, expiry.Date + OptionMath.MarketClose, OptionMath.RiskFreeRate),
-						strike, MarketClock.CloseToClose(root, target, expiry, minDays: 1), OptionMath.RiskFreeRate, iv, cp);
-				val += isLong ? legVal : -legVal;
+				decimal val = 0m;
+				foreach (var (strike, expiry, iv, isLong, cp) in legs)
+				{
+					decimal legVal = expiry.Date <= target.Date
+						? OptionMath.Intrinsic(s, strike, cp)
+						: (decimal)OptionMath.BlackScholes(
+							OptionMath.DividendAdjustedSpot(s, dividends, targetClose, expiry.Date + OptionMath.MarketClose, OptionMath.RiskFreeRate),
+							strike, MarketClock.CloseToClose(root, target, expiry, minDays: 1), OptionMath.RiskFreeRate, iv, cp);
+					val += isLong ? legVal : -legVal;
+				}
+				pnl += weight * (val - basis);
 			}
-			return val - netCostBasisPerShare;
+			return pnl;
 		}
 
-		var minStrike = legs.Min(l => l.strike);
-		var maxStrike = legs.Max(l => l.strike);
+		var minStrike = allLegs.Min(l => l.strike);
+		var maxStrike = allLegs.Max(l => l.strike);
 		var span = Math.Max(spot * 0.25m, Math.Max(maxStrike - minStrike, 5m) * 3m);
 		var lo = Math.Max(0.01m, Math.Min(spot, minStrike) - span);
 		var hi = Math.Max(spot, maxStrike) + span;
@@ -2287,6 +2318,25 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			ladder.Add(new PricePnL(p, PnlAt(p)));
 		}
 		return OptionMath.FindBreakEvensNumerically(ladder, PnlAt);
+	}
+
+	/// <summary>What a change leaves held at the scenario's <see cref="Target"/>: the <see cref="Changed"/> legs on the contracts it executes on and
+	/// the <see cref="Unchanged"/> legs on the rest, each with its net cost basis per share. <see cref="At"/> gives the break-evens when the change runs
+	/// on a fraction of the contracts — 1 for the full change, executed/total for a partial.</summary>
+	private sealed record BreakEvenBooks(
+		string Root,
+		DateTime Target,
+		decimal Spot,
+		IReadOnlyList<(decimal strike, DateTime expiry, decimal iv, bool isLong, string cp)> Changed,
+		decimal ChangedBasisPerShare,
+		IReadOnlyList<(decimal strike, DateTime expiry, decimal iv, bool isLong, string cp)> Unchanged,
+		decimal UnchangedBasisPerShare,
+		IReadOnlyList<DividendEvent>? Dividends)
+	{
+		internal List<decimal> At(decimal changedFraction) =>
+			ComputeBreakEvens(Root, changedFraction >= 1m
+				? [(Changed, ChangedBasisPerShare, 1m)]
+				: [(Changed, ChangedBasisPerShare, changedFraction), (Unchanged, UnchangedBasisPerShare, 1m - changedFraction)], Target, Spot, Dividends);
 	}
 
 	/// <summary>Probability-weighted expected per-share value of a multi-leg position at <paramref name="target"/>,

@@ -58,6 +58,8 @@ public class AnalyzePositionVerticalScenarioTests
 		Assert.Contains(scenarios, s => s.Name == "Close short only");
 		Assert.Contains(scenarios, s => s.Name == "Close all");
 		Assert.Contains(scenarios, s => s.Name.StartsWith("Roll short to $25.50", StringComparison.Ordinal));
+		Assert.All(scenarios.Where(s => s.Name.StartsWith("Roll short to ", StringComparison.Ordinal) || s.Name.StartsWith("Reset to ", StringComparison.Ordinal)),
+			s => Assert.NotEmpty(s.BreakEvens ?? []));
 		var ironCondor = Assert.Single(scenarios, s => s.Name.StartsWith("Add complementary call spread", StringComparison.Ordinal));
 		Assert.Equal(0m, ironCondor.MarginDeltaPerContract);
 		Assert.Contains("SELL GME260501C00026000", ironCondor.ActionSummary, StringComparison.Ordinal);
@@ -95,6 +97,24 @@ public class AnalyzePositionVerticalScenarioTests
 		var partialRoll = Assert.Single(scenarios, s => s.Name.StartsWith("Roll short to $25.50 (same exp 05-01, inverted diagonal) · partial ", StringComparison.Ordinal));
 		Assert.True(partialRoll.MarginDeltaPerContract * partialRoll.Qty <= settings.Cash);
 		Assert.Contains("full size would need", partialRoll.Rationale, StringComparison.Ordinal);
+		Assert.NotNull(partialRoll.BreakEvens);
+		Assert.NotEmpty(partialRoll.BreakEvens!);
+	}
+
+	[Fact]
+	public void PartialBreakEvens_WeightTheChangedAndUnchangedBooksByContracts()
+	{
+		// 22 long 731 calls at $8.64; 5 of them get a 700 call sold against them for $17.91 (an inverted vertical), 17 stay bare.
+		// At the common expiry: below 700 the mix makes 5/22·9.27 − 17/22·8.64 < 0; above 731 it climbs at 17/22 per point.
+		var expiry = new DateTime(2026, 12, 11);
+		IReadOnlyList<(decimal, DateTime, decimal, bool, string)> vertical = [(731m, expiry, 0.25m, true, "C"), (700m, expiry, 0.25m, false, "C")];
+		IReadOnlyList<(decimal, DateTime, decimal, bool, string)> bare = [(731m, expiry, 0.25m, true, "C")];
+		var changed = 5m / 22m;
+
+		var breakEvens = AnalyzePositionCommand.ComputeBreakEvens("SPY", [(vertical, 8.64m - 17.91m, changed), (bare, 8.64m, 1m - changed)], expiry, 704.74m, dividends: null);
+
+		var lossAbove731 = changed * (17.91m - 8.64m - 31m) - (1m - changed) * 8.64m;
+		Assert.Equal(731m - lossAbove731 / (1m - changed), Assert.Single(breakEvens), 2);
 	}
 
 	[Fact]
