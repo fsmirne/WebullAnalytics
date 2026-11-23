@@ -82,7 +82,7 @@ public sealed class AnalyzeRollTests
 		var oldParsed = ParsingHelpers.ParseOptionSymbol(oldSym)!;
 
 		var (candidates, skipped) = RollCandidateEnumerator.Enumerate(
-			quotes, oldParsed, oldSym, oldParsed, anchorSymbol: null, LegAction.Sell, strikesN: 1, expN: 1, today: today);
+			quotes, oldParsed, oldSym, oldParsed, anchorSymbol: null, LegAction.Sell, strikesN: 1, expN: 1, today: today, spot: 15m);
 
 		// 3 expiries (Apr 10, 17, 24) * 3 strikes (24, 25, 26) - 1 (oldSym) = 8
 		Assert.Equal(8, candidates.Count);
@@ -112,7 +112,7 @@ public sealed class AnalyzeRollTests
 		var oldParsed = ParsingHelpers.ParseOptionSymbol(oldSym)!;
 
 		var (candidates, _) = RollCandidateEnumerator.Enumerate(
-			quotes, oldParsed, oldSym, oldParsed, anchorSymbol: null, LegAction.Sell, strikesN: 1, expN: 2, today: today);
+			quotes, oldParsed, oldSym, oldParsed, anchorSymbol: null, LegAction.Sell, strikesN: 1, expN: 2, today: today, spot: 15m);
 
 		// Valid expiries >= today within ±2 of Apr 17: Apr 17, Apr 24, May 1 (3 expiries * 3 strikes - 1 old = 8)
 		Assert.Equal(8, candidates.Count);
@@ -137,12 +137,26 @@ public sealed class AnalyzeRollTests
 		var toParsed = ParsingHelpers.ParseOptionSymbol(toSym)!;
 
 		var (candidates, skipped) = RollCandidateEnumerator.Enumerate(
-			quotes, oldParsed, oldSym, toParsed, anchorSymbol: toSym, LegAction.Sell, strikesN: 1, expN: 0, today: today);
+			quotes, oldParsed, oldSym, toParsed, anchorSymbol: toSym, LegAction.Sell, strikesN: 1, expN: 0, today: today, spot: 15m);
 
 		// Anchor expiry Apr 24 only (expN=0), strikes 25, 30, 35; 35 is illiquid => 2 candidates
 		Assert.Equal(2, candidates.Count);
 		Assert.Equal(1, skipped);
 		Assert.Single(candidates, c => c.IsAnchor && c.Symbol == toSym);
+	}
+
+	[Theory]
+	[InlineData(660, 65.67, 75.70, false)]   // 2026-11-23 pre-open: 14% of mid, but $10.03 wide on $7.96 of extrinsic
+	[InlineData(660, 64.90, 65.20, true)]    // the same deep-ITM call quoted $0.30 wide on ~$2.30 of extrinsic
+	[InlineData(731, 10.84, 12.42, true)]    // out of the money: extrinsic is the whole mid, 13.6% wide
+	[InlineData(731, 10.50, 12.80, false)]   // out of the money, 19.8% wide
+	[InlineData(700, 22.80, 23.60, false)]   // $0.80 wide on $0.47 of extrinsic, floored at $1: 80%
+	[InlineData(700, 22.95, 23.05, true)]    // $0.10 wide on $0.27 of extrinsic, floored at $1: 10%
+	public void IsLiquidEnough_MeasuresTheSpreadAgainstExtrinsicValue(int strike, double bid, double ask, bool expected)
+	{
+		var parsed = new OptionParsed("SPY", new DateTime(2026, 12, 11), "C", strike);
+		var quote = Quote(MatchKeys.OccSymbol("SPY", parsed.ExpiryDate, strike, "C"), (decimal)bid, (decimal)ask);
+		Assert.Equal(expected, RollCandidateEnumerator.IsLiquidEnough(quote, parsed, 722.73m, LegAction.Sell));
 	}
 
 	[Fact]
@@ -185,7 +199,7 @@ public sealed class AnalyzeRollTests
 		var oldParsed = ParsingHelpers.ParseOptionSymbol(oldSym)!;
 
 		var (candidates, _) = RollCandidateEnumerator.Enumerate(
-			quotes, oldParsed, oldSym, oldParsed, anchorSymbol: null, LegAction.Sell, strikesN: 0, expN: 2, today: today);
+			quotes, oldParsed, oldSym, oldParsed, anchorSymbol: null, LegAction.Sell, strikesN: 0, expN: 2, today: today, spot: 700m);
 
 		Assert.Equal(2, candidates.Count);
 		var nov27 = Assert.Single(candidates, c => c.Parsed.ExpiryDate.Date == new DateTime(2026, 11, 27));

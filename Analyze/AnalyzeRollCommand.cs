@@ -219,14 +219,15 @@ internal static class RollCandidateEnumerator
 		LegAction rolledAction,
 		int strikesN,
 		int expN,
-		DateTime today)
+		DateTime today,
+		decimal spot)
 	{
 		var candidates = new List<RollCandidate>();
 		var skippedIlliquid = 0;
 		foreach (var (sym, parsed, quote, isSnapped) in Window(quotes, oldLeg, anchor, strikesN, expN, today))
 		{
 			if (string.Equals(sym, oldSymbol, StringComparison.OrdinalIgnoreCase)) continue;
-			if (!IsLiquidEnough(quote, rolledAction))
+			if (!IsLiquidEnough(quote, parsed, spot, rolledAction))
 			{
 				skippedIlliquid++;
 				continue;
@@ -287,15 +288,19 @@ internal static class RollCandidateEnumerator
 	}
 
 	/// <summary>A candidate is usable when it has a two-sided quote (bid and ask), the execution side is non-zero,
-	/// it is not a dead zero-OI/zero-volume contract, and its spread isn't grossly wide (&gt;15% on $1+ options).</summary>
-	internal static bool IsLiquidEnough(OptionContractQuote quote, LegAction rolledAction)
+	/// it is not a dead zero-OI/zero-volume contract, and its spread isn't grossly wide: on a $1+ option, wider than 15% of its extrinsic value
+	/// (floored at $1). Intrinsic is known from spot, so the quote only prices the extrinsic, and a mid inside a spread wider than that is noise the
+	/// scorer books as edge — 2026-11-23 pre-open, the 12-11 660C quoted 65.67/75.70 with spot $722.73 (14% of mid, 126% of its $7.96 extrinsic, IV
+	/// 34% beside the 731C's 22%) and selling it against a 12-11 731C ranked first on a +$423/contract EV that was all the rich mid.</summary>
+	internal static bool IsLiquidEnough(OptionContractQuote quote, OptionParsed parsed, decimal spot, LegAction rolledAction)
 	{
 		if (quote.Bid is not decimal bid || quote.Ask is not decimal ask) return false;
 		if (ask <= 0m) return false;
 		if (rolledAction == LegAction.Sell && bid <= 0m) return false;
 		if (quote.OpenInterest is 0 && (quote.Volume ?? 0) == 0) return false;
 		var mid = (bid + ask) / 2m;
-		if (mid >= 1.00m && (ask - bid) / mid > 0.15m) return false;
+		var extrinsic = mid - OptionMath.Intrinsic(spot, parsed.Strike, parsed.CallPut);
+		if (mid >= 1.00m && (ask - bid) / Math.Max(extrinsic, 1.00m) > 0.15m) return false;
 		return true;
 	}
 
@@ -1080,7 +1085,7 @@ internal sealed class AnalyzeRollCommand : AsyncCommand<AnalyzeRollSettings>
 		// Step 4: Enumerate candidates on the chain
 		var anchorParsed = targetParsed ?? rolledLeg.Option;
 		var (candidates, skippedIlliquid) = RollCandidateEnumerator.Enumerate(
-			quotes, rolledLeg.Option, rolledLeg.Symbol, anchorParsed, targetSymbol, rolledLeg.Action, strikesN, expN, EvaluationDate.Today);
+			quotes, rolledLeg.Option, rolledLeg.Symbol, anchorParsed, targetSymbol, rolledLeg.Action, strikesN, expN, EvaluationDate.Today, spot);
 
 		// Step 5: Evaluate Hold baseline + every candidate
 		var effectiveUnderlyings = new Dictionary<string, decimal>(underlyingPrices, StringComparer.OrdinalIgnoreCase) { [ticker] = spot };

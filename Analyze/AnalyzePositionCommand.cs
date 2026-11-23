@@ -1126,7 +1126,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		if (quotesForPricing != null)
 		{
 			var shorts = settings.SellAnchor is { } anchor
-				? SweepConversionShorts(quotesForPricing, longLeg, anchor, settings.SellSymbol!, settings.Strikes ?? 2, settings.Exp ?? 2, asOf)
+				? SweepConversionShorts(quotesForPricing, longLeg, anchor, settings.SellSymbol!, settings.Strikes ?? 2, settings.Exp ?? 2, asOf, spot)
 				: EnumerateConversionShorts(quotesForPricing, longLeg, spot, asOf, settings.IvDefault);
 			foreach (var cand in shorts)
 			{
@@ -1186,7 +1186,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 	/// <c>analyze roll</c> sweeps with).</summary>
 	internal static List<RollCandidate> EnumerateConversionShorts(IReadOnlyDictionary<string, OptionContractQuote> quotes, PositionSnapshot longLeg, decimal spot, DateTime asOf, decimal ivDefaultPct) =>
 		ConversionUniverse(quotes, longLeg, spot, asOf, ivDefaultPct)
-			.Where(c => RollCandidateEnumerator.IsLiquidEnough(c.Quote, LegAction.Sell))
+			.Where(c => RollCandidateEnumerator.IsLiquidEnough(c.Quote, c.Parsed, spot, LegAction.Sell))
 			.Select(c => new RollCandidate(c.Symbol, c.Parsed, c.Quote, false, false))
 			.ToList();
 
@@ -1201,8 +1201,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 	/// <summary>The --sell sweep: the listed shorts (same right, two-sided and liquid, as <c>analyze roll</c> sweeps them) ±<paramref name="strikesN"/>
 	/// strikes and ±<paramref name="expN"/> expiries around <paramref name="anchor"/>, never expiring after the long.</summary>
-	internal static List<RollCandidate> SweepConversionShorts(IReadOnlyDictionary<string, OptionContractQuote> quotes, PositionSnapshot longLeg, OptionParsed anchor, string anchorSymbol, int strikesN, int expN, DateTime asOf) =>
-		RollCandidateEnumerator.Enumerate(quotes, longLeg.Parsed, longLeg.Symbol, anchor, anchorSymbol, LegAction.Sell, strikesN, expN, asOf).Candidates
+	internal static List<RollCandidate> SweepConversionShorts(IReadOnlyDictionary<string, OptionContractQuote> quotes, PositionSnapshot longLeg, OptionParsed anchor, string anchorSymbol, int strikesN, int expN, DateTime asOf, decimal spot) =>
+		RollCandidateEnumerator.Enumerate(quotes, longLeg.Parsed, longLeg.Symbol, anchor, anchorSymbol, LegAction.Sell, strikesN, expN, asOf, spot).Candidates
 			.Where(c => c.Parsed.ExpiryDate.Date <= longLeg.Parsed.ExpiryDate.Date)
 			.ToList();
 
@@ -1586,7 +1586,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		if (quotesForPricing != null)
 		{
 			var (rollCandidates, _) = RollCandidateEnumerator.Enumerate(
-				quotesForPricing, shortLeg.Parsed, shortLeg.Symbol, shortLeg.Parsed, anchorSymbol: null, LegAction.Sell, strikesN: 5, expN: 7, today: asOf);
+				quotesForPricing, shortLeg.Parsed, shortLeg.Symbol, shortLeg.Parsed, anchorSymbol: null, LegAction.Sell, strikesN: 5, expN: 7, today: asOf, spot: spot);
 
 			foreach (var cand in rollCandidates)
 			{

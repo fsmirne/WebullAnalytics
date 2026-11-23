@@ -135,7 +135,7 @@ public class PositionConversionTests
 		var anchor = Call(new DateTime(2026, 12, 4), 700m);
 
 		Assert.Contains(stub, RollCandidateEnumerator.Window(quotes, Long680().Parsed, anchor, 0, 0, AsOf).Select(c => c.Symbol));
-		Assert.DoesNotContain(RollCandidateEnumerator.Enumerate(quotes, Long680().Parsed, Long680().Symbol, anchor, null, LegAction.Sell, 0, 0, AsOf).Candidates, c => c.Symbol == stub);
+		Assert.DoesNotContain(RollCandidateEnumerator.Enumerate(quotes, Long680().Parsed, Long680().Symbol, anchor, null, LegAction.Sell, 0, 0, AsOf, Spot).Candidates, c => c.Symbol == stub);
 	}
 
 	[Theory]
