@@ -163,7 +163,7 @@ internal static class SchwabOptionsClient
 	/// fresh client per call is what provokes the RST in the first place); a fresh request message is used per attempt.
 	/// Every attempt waits its turn at <see cref="RateGate.Schwab"/>, shared by every local process, and a 429 — Schwab's own sporadic
 	/// throttling, which arrives well under any rate the gate holds (see its comment) — is retried after its Retry-After, a bounded number of times. Other failures (auth, 502 TooBig, timeouts)
-	/// propagate to the caller unchanged. <paramref name="label"/> names the request (symbol and expiry window) in the 429 line, with Schwab's body,
+	/// propagate to the caller unchanged. <paramref name="label"/> names the request (symbol and expiry window) in the 429 line, with Schwab's body and headers (<see cref="DescribeThrottle"/>),
 	/// so a throttled request can be told apart from the rest of a tick's fetches.</summary>
 	private static async Task<(HttpStatusCode Status, string Body)> SendWithTransientRetryAsync(string url, string label, string accessToken, CancellationToken ct)
 	{
@@ -181,7 +181,7 @@ internal static class SchwabOptionsClient
 				if (response.StatusCode == HttpStatusCode.TooManyRequests && attempt < maxAttempts)
 				{
 					var wait = RateGate.RetryAfter(response, RateLimitWait, MaxRateLimitWait);
-					var reason = Truncate(await response.Content.ReadAsStringAsync(ct), 200);
+					var reason = DescribeThrottle(response, await response.Content.ReadAsStringAsync(ct));
 					Console.WriteLine($"Schwab: chains HTTP 429 for {label} ({reason}); retry {attempt} of {maxAttempts - 1} in {wait.TotalSeconds:F1}s.");
 					await Task.Delay(wait, ct);
 					continue;
@@ -195,6 +195,16 @@ internal static class SchwabOptionsClient
 				await Task.Delay(TimeSpan.FromMilliseconds(250 * attempt), ct);
 			}
 		}
+	}
+
+	/// <summary>A 429's reason on one line: its body with whitespace collapsed (first 200 characters), or "empty body", then every response and content header.
+	/// Schwab's chains 429 arrives with a whitespace-only body (2026-11-24 09:44 ET, $SPX 0DTE window), so whatever names the throttle — a limit, a gateway, a
+	/// correlation id Schwab support can trace — can only be in the headers.</summary>
+	internal static string DescribeThrottle(HttpResponseMessage response, string body)
+	{
+		var text = string.Join(' ', body.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+		var headers = response.Headers.Concat(response.Content.Headers).Select(h => $"{h.Key}: {string.Join(",", h.Value)}");
+		return $"{(text.Length == 0 ? "empty body" : Truncate(text, 200))}; headers: {string.Join("; ", headers)}";
 	}
 
 	/// <summary>The wait after a 429 that sends no Retry-After, and the longest one honored: a read retried later than this is stale for its tick.</summary>
