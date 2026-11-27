@@ -103,19 +103,16 @@ internal static class TimeDecayGridBuilder
 		// Default (non-theoretical) mode: anchor the grid to the real market mid and CARRY that anchor across
 		// EVERY column, not just today — so the whole grid rides on the observed price and reconciles with the
 		// panel's Current P&L (the same mid + modeled-change mark). Per leg, the anchor basis (model − mid,
-		// measured at the observation-instant column at the row nearest spot) is subtracted from each column
+		// measured at the observation-instant column at the market spot) is subtracted from each column
 		// where that leg still has time value; once a leg reaches expiry its cells are true intrinsic and take
 		// NO basis, so the expiry payoff stays exact. Theoretical mode skips this (pure model) — that's the
 		// point of --theoretical: model vs market-anchored, consistently across BOTH the grid and the headline.
 		if (!opts.Theoretical && opts.OptionQuotes != null && underlyingPrice.HasValue)
 		{
-			int closestRow = 0;
-			var closestDist = decimal.MaxValue;
-			for (int pi = 0; pi < priceRows.Count; pi++)
-			{
-				var dist = Math.Abs(priceRows[pi] - underlyingPrice.Value);
-				if (dist < closestDist) { closestDist = dist; closestRow = pi; }
-			}
+			// The basis is measured AT the market spot the mids were struck at, never at the nearest grid row: under --spot / --overnight the
+			// rows are built around the override, the market spot is no row, and a row's offset × delta leaked into every alive cell as if it
+			// were the market's premium over the model (an alive long beside an expired short kept it, inflating the At Exp column).
+			var anchorSpot = underlyingPrice.Value;
 
 			if (legValues != null)
 			{
@@ -124,7 +121,7 @@ internal static class TimeDecayGridBuilder
 				var allQuoted = true;
 				for (int li = 0; li < legs.Count && allQuoted; li++)
 				{
-					if (MarketBasis(priceRows[closestRow], legs[li].parsed, legs[li].symbol, legs[li].row.Side, dates[0], opts) is not { } basis) { allQuoted = false; break; }
+					if (MarketBasis(anchorSpot, legs[li].parsed, legs[li].symbol, legs[li].row.Side, dates[0], opts) is not { } basis) { allQuoted = false; break; }
 					legAdj[li] = basis;
 				}
 				if (allQuoted)
@@ -154,7 +151,7 @@ internal static class TimeDecayGridBuilder
 				if (marketMid.HasValue)
 				{
 					var marketValue = parentSide == Side.Sell ? -marketMid.Value : marketMid.Value;
-					var adjustment = CellValue(legs, qty, parentSide, netPremium, priceRows[closestRow], dates[0], OptionMath.MarketState(opts)) - marketValue;
+					var adjustment = CellValue(legs, qty, parentSide, netPremium, anchorSpot, dates[0], OptionMath.MarketState(opts)) - marketValue;
 					var legExpClose = legs[0].parsed.ExpiryDate.Date + OptionMath.MarketClose;
 					if (adjustment != 0)
 						for (int di = 0; di < dates.Count; di++)
@@ -234,13 +231,10 @@ internal static class TimeDecayGridBuilder
 		// subtracted while the leg has time value; expired legs stay true intrinsic. Theoretical mode = pure model.
 		if (!opts.Theoretical && opts.OptionQuotes != null && underlyingPrice.HasValue)
 		{
-			int closestRow = 0;
-			var closestDist = decimal.MaxValue;
-			for (int pi = 0; pi < priceRows.Count; pi++)
-			{
-				var dist = Math.Abs(priceRows[pi] - underlyingPrice.Value);
-				if (dist < closestDist) { closestDist = dist; closestRow = pi; }
-			}
+			// The basis is measured AT the market spot the mids were struck at, never at the nearest grid row: under --spot / --overnight the
+			// rows are built around the override, the market spot is no row, and a row's offset × delta leaked into every alive cell as if it
+			// were the market's premium over the model (an alive long beside an expired short kept it, inflating the At Exp column).
+			var anchorSpot = underlyingPrice.Value;
 
 			if (legValues != null)
 			{
@@ -248,7 +242,7 @@ internal static class TimeDecayGridBuilder
 				var allQuoted = true;
 				for (int li = 0; li < optionLegs.Count && allQuoted; li++)
 				{
-					if (MarketBasis(priceRows[closestRow], optionLegs[li].Parsed!, optionLegs[li].Symbol, optionLegs[li].Side, dates[0], opts) is not { } basis) { allQuoted = false; break; }
+					if (MarketBasis(anchorSpot, optionLegs[li].Parsed!, optionLegs[li].Symbol, optionLegs[li].Side, dates[0], opts) is not { } basis) { allQuoted = false; break; }
 					legAdj[li] = basis;
 				}
 				if (allQuoted)
@@ -277,7 +271,7 @@ internal static class TimeDecayGridBuilder
 				var marketMid = ComputeMergedMarketMid(optionLegs, normalizingQty, opts.OptionQuotes);
 				if (marketMid.HasValue)
 				{
-					var perPairAdjustment = PairValue(optionLegs, normalizingQty, priceRows[closestRow], dates[0], OptionMath.MarketState(opts)) - marketMid.Value;
+					var perPairAdjustment = PairValue(optionLegs, normalizingQty, anchorSpot, dates[0], OptionMath.MarketState(opts)) - marketMid.Value;
 					var legExpClose = optionLegs[0].Parsed!.ExpiryDate.Date + OptionMath.MarketClose;
 					if (perPairAdjustment != 0)
 						for (int di = 0; di < dates.Count; di++)
@@ -319,7 +313,7 @@ internal static class TimeDecayGridBuilder
 		return total;
 	}
 
-	/// <summary>A leg's anchor basis (model − market mid), measured at the market state: the row nearest the real spot, the anchor column,
+	/// <summary>A leg's anchor basis (model − market mid), measured at the market state: the real market spot, the anchor column,
 	/// and the market's IV (calibrated, else vendor) — never a --iv override. An --iv value is a scenario priced ON TOP of the anchored
 	/// market, as --spot is (the basis is measured at the real spot); measured with the override, the basis absorbed the whole IV change
 	/// and the anchored grid priced the scenario straight back to the mid (a 22% → 15% IV crush read as no change at all). Null when the
