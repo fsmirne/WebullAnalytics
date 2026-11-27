@@ -278,15 +278,16 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		// positions and every section (positions, grids, summary) shows the combined result.
 		IReadOnlyDictionary<string, OptionContractQuote>? preloadedQuotes = null;
 		IReadOnlyDictionary<string, decimal>? preloadedUnderlyings = null;
+		IReadOnlyDictionary<string, decimal>? preloadedSpotOverrides = null;
 		if (settings.Trade != null)
 		{
 			var baseTime = settings.Until != null ? settings.UntilDate.AddHours(18) : DateTime.Now;
-			var added = await AnalyzeCommon.AppendSyntheticTrades(trades, settings.Trade, baseTime, LiveQuoteSource.ResolveVendor(settings.Vendor), cancellation);
+			var added = await AnalyzeCommon.AppendSyntheticTrades(trades, settings.Trade, baseTime, settings, cancellation);
 			if (added == null) return 1;
-			(preloadedQuotes, preloadedUnderlyings, _) = added.Value;
+			(preloadedQuotes, preloadedUnderlyings, preloadedSpotOverrides, _) = added.Value;
 		}
 
-		return await RunReportPipeline(settings, trades, feeLookup, cancellation, preloadedQuotes, preloadedUnderlyings);
+		return await RunReportPipeline(settings, trades, feeLookup, cancellation, preloadedQuotes, preloadedUnderlyings, preloadedSpotOverrides);
 	}
 
 	/// <summary>Pins the evaluation instant from --date (no-op for now), announcing it.</summary>
@@ -347,7 +348,7 @@ class ReportCommand : AsyncCommand<ReportSettings>
 			.Distinct(StringComparer.OrdinalIgnoreCase)
 			.ToList();
 
-	internal static async Task<int> RunReportPipeline(ReportSettings settings, List<Trade> trades, Dictionary<(DateTime, Side, int), decimal>? feeLookup, CancellationToken cancellation, IReadOnlyDictionary<string, OptionContractQuote>? preloadedQuotes = null, IReadOnlyDictionary<string, decimal>? preloadedUnderlyingPrices = null)
+	internal static async Task<int> RunReportPipeline(ReportSettings settings, List<Trade> trades, Dictionary<(DateTime, Side, int), decimal>? feeLookup, CancellationToken cancellation, IReadOnlyDictionary<string, OptionContractQuote>? preloadedQuotes = null, IReadOnlyDictionary<string, decimal>? preloadedUnderlyingPrices = null, IReadOnlyDictionary<string, decimal>? preloadedSpotOverrides = null)
 	{
 
 		var tickerFilter = settings.TickerFilter;
@@ -373,7 +374,7 @@ class ReportCommand : AsyncCommand<ReportSettings>
 		var (positionRows, strategyAdjustments, singleLegStandalones) = PositionTracker.BuildPositionRows(positions, tradeIndex, trades);
 
 		var dateStr = DateTime.Now.ToString("yyyyMMdd");
-		var (opts, optsError) = await BuildAnalysisOptions(settings, positionRows, cancellation, preloadedQuotes, preloadedUnderlyingPrices);
+		var (opts, optsError) = await BuildAnalysisOptions(settings, positionRows, cancellation, preloadedQuotes, preloadedUnderlyingPrices, preloadedSpotOverrides: preloadedSpotOverrides);
 		if (opts == null) { Console.Error.WriteLine($"Error: {optsError}"); return 1; }
 		var displayMode = settings.DisplayMode.ToLowerInvariant();
 
@@ -403,7 +404,8 @@ class ReportCommand : AsyncCommand<ReportSettings>
 	/// instant's market can't be rebuilt for every leg.</summary>
 	/// <param name="preloadedAsOf">The preloaded quotes are already the past instant's real books (BID/MID/ASK resolution loaded them).</param>
 	/// <param name="nearestBoundary">The pinned instant is a fill's (read at the minute boundary nearest it), not an exact --date minute.</param>
-	internal static async Task<(AnalysisOptions? Options, string? Error)> BuildAnalysisOptions(GridSettings settings, List<PositionRow> positionRows, CancellationToken cancellation, IReadOnlyDictionary<string, OptionContractQuote>? preloadedQuotes = null, IReadOnlyDictionary<string, decimal>? preloadedUnderlyingPrices = null, bool preloadedAsOf = false, bool nearestBoundary = false)
+	/// <param name="preloadedSpotOverrides">Spot overrides the spec's BID/MID/ASK pricing already resolved; kept, so the grids value at the spot the fills priced at.</param>
+	internal static async Task<(AnalysisOptions? Options, string? Error)> BuildAnalysisOptions(GridSettings settings, List<PositionRow> positionRows, CancellationToken cancellation, IReadOnlyDictionary<string, OptionContractQuote>? preloadedQuotes = null, IReadOnlyDictionary<string, decimal>? preloadedUnderlyingPrices = null, bool preloadedAsOf = false, bool nearestBoundary = false, IReadOnlyDictionary<string, decimal>? preloadedSpotOverrides = null)
 	{
 		// Fetch live option chain + risk-free rate so break-even panels show the time-decay grid with
 		// current IV / spot / theta. Failures (no api-config.json, expired headers, network blip) degrade
@@ -475,7 +477,7 @@ class ReportCommand : AsyncCommand<ReportSettings>
 
 		var targetTickers = (IEnumerable<string>?)underlyingPrices?.Keys
 			?? positionRows.Where(r => r.MatchKey != null).Select(r => MatchKeys.GetTicker(r.MatchKey!)).Where(t => !string.IsNullOrEmpty(t)).Select(t => t!);
-		IReadOnlyDictionary<string, decimal>? underlyingPriceOverrides = await AnalyzeCommon.ResolveSpotOverrideMapAsync(settings.Spot, settings.SpotSession, targetTickers, vendor, underlyingPrices, cancellation);
+		IReadOnlyDictionary<string, decimal>? underlyingPriceOverrides = await AnalyzeCommon.ResolveSpotOverrideMapAsync(settings.Spot, settings.SpotSession, targetTickers, vendor, underlyingPrices, cancellation, resolved: preloadedSpotOverrides);
 
 		IReadOnlyDictionary<string, List<decimal>>? extraLevels = null;
 		if (settings.Levels != null)

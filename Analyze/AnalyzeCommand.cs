@@ -85,7 +85,7 @@ internal sealed class AnalyzeTradeCommand : AsyncCommand<AnalyzeTradeSettings>
 
 		var trades = new List<Trade>();
 		var baseTime = EvaluationDate.IsPast ? EvaluationDate.Instant!.Value : DateTime.Now;
-		var added = await AnalyzeCommon.AppendSyntheticTrades(trades, settings.Spec, baseTime, LiveQuoteSource.ResolveVendor(settings.Vendor), cancellation);
+		var added = await AnalyzeCommon.AppendSyntheticTrades(trades, settings.Spec, baseTime, settings, cancellation);
 		if (added == null) return 1;
 
 		var closeLookup = await ReportCommand.BuildUnderlyingCloseLookup(trades, cancellation);
@@ -97,7 +97,7 @@ internal sealed class AnalyzeTradeCommand : AsyncCommand<AnalyzeTradeSettings>
 			return 0;
 		}
 
-		var (opts, optsError) = await ReportCommand.BuildAnalysisOptions(settings, positionRows, cancellation, added.Value.Quotes, added.Value.Underlyings, preloadedAsOf: added.Value.AsOf, nearestBoundary: atFill);
+		var (opts, optsError) = await ReportCommand.BuildAnalysisOptions(settings, positionRows, cancellation, added.Value.Quotes, added.Value.Underlyings, preloadedAsOf: added.Value.AsOf, nearestBoundary: atFill, preloadedSpotOverrides: added.Value.SpotOverrides);
 		if (opts == null) { Console.Error.WriteLine($"Error: {optsError}"); return 1; }
 		var displayMode = settings.DisplayMode.ToLowerInvariant();
 		var toText = settings.OutputFormat.Equals("text", StringComparison.OrdinalIgnoreCase);
@@ -202,17 +202,20 @@ internal static class AnalyzeCommon
 	}
 
 	/// <summary>Appends <paramref name="tradesSpec"/> to <paramref name="trades"/> as synthetic trades stamped at <paramref name="baseTime"/>
-	/// (sequenced after the existing ones), first fetching live quotes when a leg prices at BID|MID|ASK. Returns the quotes and
-	/// underlyings that fetch loaded (empty when none was needed), or null after printing the error when it failed.</summary>
-	/// <summary>Appends the spec's trades, resolving BID/MID/ASK prices from the market at the evaluation instant. <c>AsOf</c> is true when
-	/// those quotes are a past instant's real books (the report pipeline then reuses them instead of loading them again).</summary>
-	internal static async Task<(IReadOnlyDictionary<string, OptionContractQuote>? Quotes, IReadOnlyDictionary<string, decimal>? Underlyings, bool AsOf)?> AppendSyntheticTrades(List<Trade> trades, string tradesSpec, DateTime baseTime, QuoteVendor vendor, CancellationToken cancellation)
+	/// (sequenced after the existing ones). A leg priced at BID|MID|ASK resolves from the market at the evaluation instant (a past instant's
+	/// real books, else the live chain) re-marked sticky-strike to the evaluation spot (<c>--spot</c> / <c>--extended</c> / <c>--overnight</c>,
+	/// <see cref="RemarkToSpots"/>), so the fill price agrees with the spot the grids value the position at. Returns those quotes and spots,
+	/// the spot overrides resolved (null when none, or when no market prices were needed; the report pipeline reuses them so it values at
+	/// the same spot without resolving it again), and <c>AsOf</c> = the quotes are a past instant's books. Null after printing the error.</summary>
+	internal static async Task<(IReadOnlyDictionary<string, OptionContractQuote>? Quotes, IReadOnlyDictionary<string, decimal>? Underlyings, IReadOnlyDictionary<string, decimal>? SpotOverrides, bool AsOf)?> AppendSyntheticTrades(List<Trade> trades, string tradesSpec, DateTime baseTime, GridSettings settings, CancellationToken cancellation)
 	{
 		IReadOnlyDictionary<string, OptionContractQuote>? quotes = null;
 		IReadOnlyDictionary<string, decimal>? underlyings = null;
+		IReadOnlyDictionary<string, decimal>? spotOverrides = null;
 		var asOf = false;
 		if (NeedsMarketPrices(tradesSpec))
 		{
+			var vendor = LiveQuoteSource.ResolveVendor(settings.Vendor);
 			var symbols = ParseAllLegs(tradesSpec).Select(leg => leg.Symbol).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
 			// BID/MID/ASK at a past evaluation instant are that instant's books, not today's.
 			if (EvaluationDate.IsPast)
@@ -226,10 +229,15 @@ internal static class AnalyzeCommon
 				(quotes, underlyings) = await FetchQuotesAndUnderlyingForSymbolList(symbols, vendor, cancellation);
 				if (quotes == null) return null;
 			}
+			if (underlyings != null)
+			{
+				spotOverrides = await ResolveSpotOverrideMapAsync(settings.Spot, settings.SpotSession, underlyings.Keys, vendor, underlyings, cancellation);
+				(quotes, underlyings) = RemarkToSpots(quotes, underlyings, spotOverrides);
+			}
 		}
 		var nextSeq = trades.Count > 0 ? trades.Max(t => t.Seq) + 1 : 0;
 		trades.AddRange(ParseSyntheticTrades(tradesSpec, nextSeq, baseTime, quotes));
-		return (quotes, underlyings, asOf);
+		return (quotes, underlyings, spotOverrides, asOf);
 	}
 
 	internal static bool NeedsMarketPrices(string tradesSpec) =>
@@ -392,18 +400,22 @@ internal static class AnalyzeCommon
 
 	/// <summary>Merges explicit <c>--spot</c> entries with the live <paramref name="session"/>'s prices (<c>--extended</c> /
 	/// <c>--overnight</c>) for <paramref name="tickers"/>. Explicit <c>--spot</c> entries win per ticker; the session fills in any
-	/// remaining tickers (no-op at a past <c>--date</c>). Returns null when neither yields an override.</summary>
+	/// remaining tickers (no-op at a past <c>--date</c>). <paramref name="resolved"/> is a map an earlier call in the same run already
+	/// resolved: its tickers keep those spots and aren't fetched again, so one run values every leg at one session print. Returns null
+	/// when nothing yields an override.</summary>
 	internal static async Task<Dictionary<string, decimal>?> ResolveSpotOverrideMapAsync(
 		string? spotSpec,
 		SpotSession session,
 		IEnumerable<string> tickers,
 		QuoteVendor vendor,
 		IReadOnlyDictionary<string, decimal>? rthSpots,
-		CancellationToken cancellation)
+		CancellationToken cancellation,
+		IReadOnlyDictionary<string, decimal>? resolved = null)
 	{
-		var overrides = !string.IsNullOrWhiteSpace(spotSpec)
-			? ReportCommand.ParseUnderlyingPriceOverrides(spotSpec)
-			: new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+		var overrides = new Dictionary<string, decimal>(resolved ?? new Dictionary<string, decimal>(), StringComparer.OrdinalIgnoreCase);
+		if (!string.IsNullOrWhiteSpace(spotSpec))
+			foreach (var (ticker, price) in ReportCommand.ParseUnderlyingPriceOverrides(spotSpec))
+				overrides[ticker] = price;
 
 		if (session != SpotSession.Regular && !EvaluationDate.IsPast)
 		{
