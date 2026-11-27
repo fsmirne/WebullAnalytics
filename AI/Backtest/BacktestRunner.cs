@@ -84,7 +84,11 @@ internal sealed class BacktestRunner
 	private int _droppedRuleActions;   // rule-proposed Close/Roll/LegIn that never filled: unfillable at the 09:30 pass AND never filled by the minute walk (see ReportUnfilledRuleActions), or an unpriceable partial-expiry survivor
 	private readonly Dictionary<string, string> _unfilledRuleActions = new(StringComparer.OrdinalIgnoreCase);   // position key → why its 09:30 action couldn't fill; cleared when any later action fills it that session
 	private int _blindPositionDays;    // position-days where NO leg had a quote, so rules could not evaluate the position at all
-	private readonly HashSet<long> _openFallbackLineages = new();   // window-end lineages with >=1 leg marked at entry price (no NBBO) — unrealized not fully real-priced
+	// Last real close mark per held leg (symbol, held side), written by each session's equity mark. A leg with no
+	// NBBO at a later mark (e.g. a window ending on today's session before the evening pull) falls back to it: the
+	// most recent real price is closer to the truth than the entry fill or intrinsic.
+	private readonly Dictionary<(string Symbol, Side Side), decimal> _lastRealLegMark = new();
+	private readonly HashSet<long> _openFallbackLineages = new();   // window-end lineages with >=1 leg with no window-end NBBO (marked at its last real close, else entry price) — unrealized not fully real-priced
 
 	// Conceptual fill times within a trading day, stamped with start-of-minute labels — the
 	// start-of-bar convention: a bar at 09:30:00 covers the 09:30→09:31 ET minute and contains the
@@ -95,6 +99,10 @@ internal sealed class BacktestRunner
 	// Polygon, ToS, and TradingView. Expirations settle at bar.Close intrinsic, stamped at 16:00 ET.
 	private static readonly TimeSpan MarketOpenTime = TimeSpan.FromHours(9) + TimeSpan.FromMinutes(30);
 	private static readonly TimeSpan MarketCloseTime = TimeSpan.FromHours(16);
+
+	/// <summary>The session's close on <paramref name="step"/>'s day (16:00 ET, 13:00 on a half-day): the instant
+	/// open positions are marked at for the equity curve and the window-end unrealized P&L.</summary>
+	internal static DateTime SessionCloseEt(DateTime step) => step.Date.Add(MarketCalendar.CloseTimeEt(step.Date));
 
 	public BacktestRunner(AIConfig config, SimulatedBook book, BacktestPositionSource positions, IBacktestQuoteSource quotes, HistoricalBarCache bars, HistoricalPriceCache closeCache, int topNPerStep, bool oracle = false, bool profile = false, int? fixedContracts = null, string pricingMode = SuggestionPricing.Mid, decimal? cross = null, int scanStride = 1, IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividendsByRoot = null, bool splitStructures = false, IReadOnlyList<ProposalReplayOpen>? replayOpens = null, IReadOnlyList<(DateTime Date, double Rate)>? rateHistory = null, IntradayBarCache? intradayBars = null, int cascadeCadenceMinutes = 10, bool cascadeRecache = false)
 	{
@@ -260,8 +268,11 @@ internal sealed class BacktestRunner
 
 			if (profile) { msTriggers += swSection!.ElapsedMilliseconds; swSection.Restart(); }
 
-			// Track equity curve at end-of-step: cash + MTM of open positions.
-			var mtm = await ComputeOpenMarkAsync(step, cancellation);
+			// Track equity curve at end-of-step: cash + MTM of open positions, marked at the session's close (the
+			// last RTH book, 13:00 on a half-day). `step` is the 09:30 open: marking there valued every position at
+			// the morning's book after the whole session had been walked, so a position opened at 09:30 marked at
+			// its own fill and the day's move never reached equity, the drawdown, or the window-end unrealized.
+			var mtm = await ComputeOpenMarkAsync(SessionCloseEt(step), cancellation);
 			var equity = _book.Cash + mtm;
 			equityCurve.Add((step.Date, equity));
 			if (equity > peakEquity) peakEquity = equity;
@@ -293,7 +304,7 @@ internal sealed class BacktestRunner
 		}
 
 		// Final per-lineage MTM for still-open positions so the renderer can compute unrealized P&L.
-		var endMtmByLineage = await ComputeOpenMarkPerLineageAsync(steps.Count > 0 ? steps[^1] : until, cancellation);
+		var endMtmByLineage = await ComputeOpenMarkPerLineageAsync(steps.Count > 0 ? SessionCloseEt(steps[^1]) : until, cancellation);
 
 		return new BacktestResult(
 			StartingCash: startingCash,
@@ -423,9 +434,10 @@ internal sealed class BacktestRunner
 		// Entry (open-fill) price per (LineageId, Symbol) — the fallback mark for a leg with no NBBO at the
 		// window end. Previously a single missing near-money quote set allLegsPriced=false and zeroed the WHOLE
 		// position (EndMtm dropped to 0 → unrealized booked the full debit as a loss, discarding the value of
-		// the well-priced legs). Now each leg marks independently: real NBBO if present, else its entry price
-		// (assume unchanged since open — approximate but bounded), and the lineage is flagged so the summary can
-		// warn that its unrealized is not fully real-priced. A leg with neither NBBO nor an entry marks at 0.
+		// the well-priced legs). Now each leg marks independently: real NBBO if present, else its last real close
+		// mark from an earlier session (_lastRealLegMark), else its entry price (a leg opened on the window's
+		// final, unquoted session), and the lineage is flagged so the summary can warn that its unrealized is not
+		// fully real-priced. A leg with none of these marks at 0.
 		// Keyed by lineage, not PositionKey: a partial-expiry survivor is re-keyed with no fill under the new
 		// key, but its lineage — and its legs' open fills — are unchanged.
 		var entryPriceByLineageSymbol = _book.Fills
@@ -449,6 +461,7 @@ internal sealed class BacktestRunner
 				decimal mid;
 				if (snap.Options.TryGetValue(leg.Symbol, out var q) && q.Bid.HasValue && q.Ask.HasValue)
 					mid = OptionMath.HeldLegMark(q.Bid.Value, q.Ask.Value, leg.Side == Side.Buy);
+				else if (_lastRealLegMark.TryGetValue((leg.Symbol, leg.Side), out var lastReal)) { mid = lastReal; usedFallback = true; }
 				else if (entryPriceByLineageSymbol.TryGetValue((lineage.Value, leg.Symbol), out var entry)) { mid = entry; usedFallback = true; }
 				else { mid = 0m; usedFallback = true; }
 				perContract += leg.Side == Side.Buy ? mid : -mid;
@@ -2087,13 +2100,18 @@ internal sealed class BacktestRunner
 			decimal perContract = 0m;
 			foreach (var leg in pos.Legs)
 			{
-				// Prefer the BS-priced mid from the quote source. If a leg can't be priced (e.g. a sparse
-				// edge case in the bar cache), fall back to intrinsic value rather than zeroing out the
+				// Prefer the real mid from the quote source, then the leg's last real close mark. If a leg can't be
+				// priced either way (e.g. a sparse edge case in the bar cache), fall back to intrinsic value rather than zeroing out the
 				// whole position — that would falsely report a big drawdown on a single sparse day.
 				decimal legValue;
 				if (snap.Options.TryGetValue(leg.Symbol, out var q) && q.Bid.HasValue && q.Ask.HasValue)
 				{
 					legValue = OptionMath.HeldLegMark(q.Bid.Value, q.Ask.Value, leg.Side == Side.Buy);
+					_lastRealLegMark[(leg.Symbol, leg.Side)] = legValue;
+				}
+				else if (_lastRealLegMark.TryGetValue((leg.Symbol, leg.Side), out var lastReal))
+				{
+					legValue = lastReal;
 				}
 				else if (snap.Underlyings.TryGetValue(pos.Ticker, out var spot) && leg.CallPut != null)
 				{

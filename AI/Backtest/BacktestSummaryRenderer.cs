@@ -22,7 +22,7 @@ internal static class BacktestSummaryRenderer
 		RenderOpenPositionsTable(result);
 		RenderSummaryPanel(result);
 		if (result.OpenPositionsFallbackMarked > 0)
-			AnsiConsole.MarkupLine($"[yellow]⚠ {result.OpenPositionsFallbackMarked} open position(s) had a leg with no window-end NBBO — marked at entry price, so their unrealized P&L is approximate (not fully real-priced). Re-pull the quote store to resolve.[/]");
+			AnsiConsole.MarkupLine($"[yellow]⚠ {result.OpenPositionsFallbackMarked} open position(s) had a leg with no window-end NBBO — marked at its last real close (entry price if it never had one), so their unrealized P&L is approximate (not fully real-priced). A window ending on today's session resolves after the evening pull; past gaps need a backfill.[/]");
 		RenderPerTickerBreakdown(result);
 		if (bookCmd) RenderBookCommand(result);
 	}
