@@ -19,10 +19,10 @@ namespace WebullAnalytics.AI;
 ///   - Individual leg execution prints may land at $0.01 regardless — that's fill mechanics, not
 ///     submission, and is not this helper's concern.
 ///
-/// Penny-pilot equity options (SPY, QQQ, IWM, etc.) technically accept $0.01 below $3 on single-leg
-/// orders. This helper over-rounds them to $0.05 — costs at most a few cents of edge per order
-/// when the bot eventually trades those single-leg, but never gets rejected. Add a penny-pilot
-/// allow-list when that case actually bites.
+/// SPY, QQQ and IWM are the penny program's all-penny classes: $0.01 at every premium, single-leg and
+/// complex (<see cref="AllPennyTickers"/>). Over-rounded, a ~$27 SPY single leg priced to $0.10 lost up to a
+/// nickel of rounding per order and a repriced one stepped ten cents at a time. Other penny-pilot classes
+/// ($0.01 only below $3) still over-round to $0.05.
 ///
 /// Rounds to nearest (MidpointRounding.AwayFromZero) so the submitted limit stays neutral to the
 /// model's mid — no buy/sell asymmetry.
@@ -40,10 +40,13 @@ internal static class OptionPriceRounding
 	/// worthless-position close rounds to a $0.00 net, which brokers reject outright.</summary>
 	public static decimal MinTick(int legCount, string ticker) => Tick(0m, legCount, ticker);
 
+	/// <summary>The penny program's all-penny classes: $0.01 at every premium, single-leg and complex.</summary>
+	internal static readonly IReadOnlySet<string> AllPennyTickers = new HashSet<string>(["SPY", "QQQ", "IWM"], StringComparer.OrdinalIgnoreCase);
+
 	/// <summary>Price increment the exchange accepts for an order of this shape at this price.</summary>
 	internal static decimal Tick(decimal price, int legCount, string ticker)
 	{
-		if (string.Equals(ticker, "XSP", StringComparison.OrdinalIgnoreCase)) return 0.01m;
+		if (string.Equals(ticker, "XSP", StringComparison.OrdinalIgnoreCase) || AllPennyTickers.Contains(ticker)) return 0.01m;
 
 		var isSpxClass = string.Equals(ticker, "SPX", StringComparison.OrdinalIgnoreCase)
 			|| string.Equals(ticker, "SPXW", StringComparison.OrdinalIgnoreCase);

@@ -92,9 +92,12 @@ public class BrokerStopManagerTests
 		Assert.Equal(2.40m, combo.Stop);
 		Assert.Equal(2.28m, combo.Limit);   // 2.40 − 5% = 2.28; a SPY combo ticks a cent
 
-		var single = BrokerStopManager.Plan(2.40m, legCount: 1, "SPY", 0.05m, stopMarket: false)!.Value;
+		var single = BrokerStopManager.Plan(2.40m, legCount: 1, "TSLA", 0.05m, stopMarket: false)!.Value;
 		Assert.Equal(2.40m, single.Stop);
-		Assert.Equal(2.30m, single.Limit);  // a single option ticks 0.05: 2.28 rounds to 2.30
+		Assert.Equal(2.30m, single.Limit);  // a non-all-penny single option ticks 0.05: 2.28 rounds to 2.30
+
+		var spySingle = BrokerStopManager.Plan(2.40m, legCount: 1, "SPY", 0.05m, stopMarket: false)!.Value;
+		Assert.Equal(2.28m, spySingle.Limit);  // SPY is all-penny: a single ticks a cent too
 	}
 
 	[Fact]
@@ -111,7 +114,7 @@ public class BrokerStopManagerTests
 	public void Plan_StopMarketHasNoLimit_AndANearZeroTriggerHasNoPlan()
 	{
 		Assert.Null(BrokerStopManager.Plan(2.40m, 1, "SPY", 0.05m, stopMarket: true)!.Value.Limit);
-		Assert.Null(BrokerStopManager.Plan(0.04m, 1, "SPY", 0.05m, stopMarket: false));
+		Assert.Null(BrokerStopManager.Plan(0.04m, 1, "TSLA", 0.05m, stopMarket: false));
 	}
 
 	[Fact]

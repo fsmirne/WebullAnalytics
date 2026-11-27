@@ -15,9 +15,19 @@ public class OptionPriceRoundingTests
 	[InlineData(2.99, "SPXW", 3.00)]     // boundary: rounds across the $3 threshold
 	[InlineData(3.05, "SPXW", 3.10)]     // just above boundary, $0.10 tick
 	[InlineData(0.07, "SPXW", 0.05)]     // small premium, $0.05 tick
-	[InlineData(1.234, "SPY", 1.25)]     // single-leg non-SPX (penny-pilot in reality, but helper conservatively rounds to $0.05)
+	[InlineData(1.234, "TSLA", 1.25)]    // single-leg penny-pilot below $3: helper conservatively rounds to $0.05
 	[InlineData(5.07, "GME", 5.10)]      // single-leg non-SPX at/above $3
 	public void SingleLeg_UsesNonPennyPilotRule(decimal input, string ticker, decimal expected)
+	{
+		Assert.Equal(expected, OptionPriceRounding.RoundToTick(input, legCount: 1, ticker));
+	}
+
+	[Theory]
+	[InlineData(1.234, "SPY", 1.23)]
+	[InlineData(26.663, "SPY", 26.66)]   // a penny, not $0.10, above $3
+	[InlineData(27.79, "qqq", 27.79)]
+	[InlineData(10.826, "IWM", 10.83)]
+	public void SingleLeg_AllPennyClasses_UsePennyAtEveryPremium(decimal input, string ticker, decimal expected)
 	{
 		Assert.Equal(expected, OptionPriceRounding.RoundToTick(input, legCount: 1, ticker));
 	}
@@ -46,7 +56,8 @@ public class OptionPriceRoundingTests
 	[InlineData(2, "XSP", 0.01)]
 	[InlineData(2, "SPXW", 0.05)]
 	[InlineData(2, "SPY", 0.01)]
-	[InlineData(1, "SPY", 0.05)]
+	[InlineData(1, "SPY", 0.01)]
+	[InlineData(1, "TSLA", 0.05)]
 	public void MinTick_MatchesTickTable(int legCount, string ticker, decimal expected)
 	{
 		Assert.Equal(expected, OptionPriceRounding.MinTick(legCount, ticker));
