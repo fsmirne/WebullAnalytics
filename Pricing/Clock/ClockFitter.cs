@@ -25,12 +25,17 @@ internal sealed record ClockFit(
 /// by T1/T0 — so the vol is solved once per option and each candidate costs one Black evaluation per option.</summary>
 internal static class ClockFitter
 {
-	/// <summary>Minimum evidence for a fit: nights overall, nights spanning a weekend/holiday, and priced options.</summary>
-	internal const int MinNights = 60, MinClosedDayNights = 20, MinOptions = 5000;
+	/// <summary>Minimum evidence for a fit: nights overall, nights spanning a weekend/holiday, and priced options. The nights are the real
+	/// guard — options within a night share its error — so the option floor only rules out a window of near-empty books. It was 5000, which a
+	/// ±5% band can't reach on a low-priced root whatever its history: GME (~$25, $0.50 strikes, 2–3 OTM strikes a side) had ~2,000 priced
+	/// options over 240 nights; SPY's windows carry ~250k, so lowering it changes no SPY fit.</summary>
+	internal const int MinNights = 60, MinClosedDayNights = 20, MinOptions = 1000;
 
 	/// <summary>A night is skipped when the at-the-money vol of an expiry at least <see cref="JumpMinDte"/> days out moved more than
 	/// <see cref="JumpMaxRelative"/> (relative) between the close and the 09:45 book — an earnings crush or a market shock, not decay.
-	/// That far out a weekend moves the vol only a few percent, so normal nights pass.</summary>
+	/// That far out a weekend moves the vol only a few percent, so normal nights pass. Only an expiry whose at-the-money option is
+	/// <see cref="IsTight"/> in both books is judged: a wide quote's mid moves by its noise, and on GME one wide far-dated book skipped
+	/// 62% of nights (154 of 249; 6 once wide books are not judged).</summary>
 	internal const int JumpMinDte = 20;
 	internal const double JumpMaxRelative = 0.15;
 
@@ -130,7 +135,7 @@ internal static class ClockFitter
 				var mid0 = q0.Mid;
 				var mid1 = q1.Mid;
 				if (mid0 < 0.05m || mid1 < 0.05m) continue;
-				if (q1.Ask - q1.Bid > Math.Max(0.10m * mid1, 0.05m)) continue;
+				if (!IsTight(q1)) continue;
 				var intrinsic0 = Math.Max(0m, q0.IsCall ? b0.Forward - q0.Strike : q0.Strike - b0.Forward);
 				if (mid0 <= intrinsic0 + 0.01m) continue;
 				var sigma = OptionMath.ImpliedVol(b0.Forward, q0.Strike, OptionTime.Calendar(calendar0), 0.0, mid0, q0.IsCall ? "C" : "P");
@@ -149,11 +154,16 @@ internal static class ClockFitter
 		return v0 is > 0.011m && v1 is > 0.011m && Math.Abs((double)(v1.Value / v0.Value) - 1.0) > JumpMaxRelative;
 	}
 
-	/// <summary>Calendar-clock implied vol of the option nearest the forward, or null for an empty book / no time left.</summary>
+	/// <summary>A quote tight enough to read: spread at most 10% of mid, or $0.05.</summary>
+	internal static bool IsTight(ClockQuote q) => q.Ask - q.Bid <= Math.Max(0.10m * q.Mid, 0.05m);
+
+	/// <summary>Calendar-clock implied vol of the option nearest the forward, or null for an empty book, no time left, or a nearest
+	/// option that isn't <see cref="IsTight"/>.</summary>
 	private static decimal? AtmVol(ClockExpiryBook b, double years)
 	{
 		if (b.Options.Count == 0 || years <= 0) return null;
 		var q = b.Options.MinBy(o => Math.Abs(o.Strike - b.Forward));
+		if (!IsTight(q)) return null;
 		return OptionMath.ImpliedVol(b.Forward, q.Strike, OptionTime.Calendar(years), 0.0, q.Mid, q.IsCall ? "C" : "P");
 	}
 }

@@ -23,6 +23,35 @@ public class ClockFitterTests
 	[Fact]
 	public void ThinHistory_DoesNotFit() => Assert.Null(ClockFitter.Fit("TEST", SyntheticDays(new DateOnly(2026, 1, 5), sessions: 20)));
 
+	// One far expiry's at-the-money 09:46 quote marked 30% rich every morning: as a tight quote it is a real vol jump and skips the night; as a
+	// wide one it is noise and must not (GME 2026: one wide far-dated book skipped 154 of 249 nights and the root never fitted).
+	[Fact]
+	public void AWideAtTheMoneyQuote_IsNotAVolJump()
+	{
+		var fit = ClockFitter.Fit("TEST", WithRichFarAtm(SyntheticDays(new DateOnly(2026, 1, 5), sessions: 130), halfSpreadPct: 0.25m));
+		Assert.NotNull(fit);
+		Assert.Equal(0, fit!.SkippedNights);
+		Assert.InRange(fit.Overnight, TrueClock.Overnight - 0.02, TrueClock.Overnight + 0.02);
+	}
+
+	[Fact]
+	public void ATightAtTheMoneyQuote_ThatJumps_StillSkipsTheNight() =>
+		Assert.Null(ClockFitter.Fit("TEST", WithRichFarAtm(SyntheticDays(new DateOnly(2026, 1, 5), sessions: 130), halfSpreadPct: 0.01m)));
+
+	/// <summary>Re-marks, in every 09:46 book, the at-the-money option of the first expiry ≥ <see cref="ClockFitter.JumpMinDte"/> days out at
+	/// 1.3× its mid with a half-spread of <paramref name="halfSpreadPct"/> of that mid.</summary>
+	private static List<ClockDay> WithRichFarAtm(List<ClockDay> days, decimal halfSpreadPct) => days.Select(day =>
+	{
+		var open = day.Open.ToList();
+		var i = open.FindIndex(b => b.Expiry.DayNumber - day.Date.DayNumber >= ClockFitter.JumpMinDte);
+		if (i < 0) return day;
+		var book = open[i];
+		var atm = book.Options.MinBy(o => Math.Abs(o.Strike - book.Forward));
+		var mid = atm.Mid * 1.3m;
+		open[i] = book with { Options = book.Options.Select(o => o == atm ? o with { Bid = mid * (1m - halfSpreadPct), Ask = mid * (1m + halfSpreadPct) } : o).ToList() };
+		return day with { Open = open };
+	}).ToList();
+
 	[Fact]
 	public void BuildExpiryBook_ParityForward_AndOutOfTheMoneyBand()
 	{
