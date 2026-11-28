@@ -46,6 +46,19 @@ public class EventVetoTests
 			TargetExpiry: expiry);
 	}
 
+	[Theory]
+	[InlineData(-1, 0, false)] // already reported
+	[InlineData(0, 0, true)]   // today
+	[InlineData(11, 0, true)]  // on the short's expiry
+	[InlineData(12, 0, false)] // the day after, no blackout
+	[InlineData(12, 1, true)]  // the day after, inside a 1-day blackout
+	public void EarningsWithin_spans_today_through_expiry_plus_blackout(int earningsDaysOut, int blackoutAfter, bool inside)
+	{
+		var earnings = AsOf.AddDays(earningsDaysOut);
+		var events = new TickerEvents(Ticker, NextEarningsDate: earnings, null, null, null);
+		Assert.Equal(inside ? earnings : null, EventVeto.EarningsWithin(events, AsOf, TargetExpiry, blackoutAfter));
+	}
+
 	[Fact]
 	public void Returns_false_when_disabled()
 	{

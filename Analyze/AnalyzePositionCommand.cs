@@ -83,6 +83,26 @@ internal sealed class AnalyzePositionSettings : AnalyzeIvOverrideSettings
 	[Description("Single long: ±N listed expirations around the conversion EV grid's center, clamped at today. Default 2.")]
 	public int? Exp { get; set; }
 
+	[CommandOption("--dte <MIN-MAX>")]
+	[Description("Rolls and single-long conversions: keep only new shorts expiring MIN-MAX days out (e.g. 5-15). Defaults to the ticker's strategy layer short-DTE band (enabled longDiagonal/longCalendar shortDteMin-shortDteMax); 'all' sweeps every expiry. Not applied with --sell, whose window is explicit.")]
+	public string? Dte { get; set; }
+
+	/// <summary>The parsed --dte band: null when not given or 'all'.</summary>
+	internal (int Min, int Max)? DteBand => TryParseDteBand(Dte, out var band) ? band : null;
+
+	/// <summary>True when --dte is 'all': sweep every expiry, overriding the strategy layer's band.</summary>
+	internal bool DteAll => string.Equals(Dte?.Trim(), "all", StringComparison.OrdinalIgnoreCase);
+
+	/// <summary>Parses "MIN-MAX" (0 ≤ MIN ≤ MAX) into a DTE band.</summary>
+	internal static bool TryParseDteBand(string? spec, out (int Min, int Max) band)
+	{
+		band = default;
+		var parts = spec?.Split('-', StringSplitOptions.TrimEntries);
+		if (parts is not { Length: 2 } || !int.TryParse(parts[0], NumberStyles.None, CultureInfo.InvariantCulture, out var min) || !int.TryParse(parts[1], NumberStyles.None, CultureInfo.InvariantCulture, out var max) || min > max) return false;
+		band = (min, max);
+		return true;
+	}
+
 	/// <summary>The --sell symbol, upper-cased; null when not given (the grid centers on the best conversion).</summary>
 	internal string? SellSymbol => string.IsNullOrWhiteSpace(Sell) ? null : Sell.Trim().ToUpperInvariant();
 
@@ -145,6 +165,8 @@ internal sealed class AnalyzePositionSettings : AnalyzeIvOverrideSettings
 			return ValidationResult.Error("--strikes / --exp: must be ≥ 0");
 		if (SellSymbol != null && (Theoretical || DateSpec.Kind != AsOfKind.Now))
 			return ValidationResult.Error("--sell sweeps the live chain; it can't run with --theoretical or a --date other than now");
+		if (Dte != null && !DteAll && DteBand == null)
+			return ValidationResult.Error($"--dte: expected MIN-MAX (e.g. 5-15) or 'all', got '{Dte}'");
 
 		return ValidationResult.Success();
 	}
@@ -402,7 +424,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 
 		// When the opener scorer will re-value the scenarios, every swept candidate (rolls, single-long conversions) is kept for it and the shortlist is chosen afterwards on its EV.
 		var rescore = aiCfg != null && quotes != null && !settings.Theoretical;
-		var scenarios = GenerateScenarios(positionLegs, structure, settings, spot.Value, asOf, quotes, technicalBias, dividends, shortlistSwept: false);
+		var shortDteBand = ResolveShortDteBand(settings, aiCfg);
+		var (scenarios, outOfBand) = ScreenSwept(GenerateScenarios(positionLegs, structure, settings, spot.Value, asOf, quotes, technicalBias, dividends, shortlistSwept: false), positionLegs, shortDteBand, positionEvents, aiCfg?.Indicators.Events.EarningsBlackoutDaysAfter ?? 0, asOf);
 		if (rescore)
 		{
 			var asOfNow = asOfMarket?.Instant ?? DateTime.Now;
@@ -443,6 +466,10 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 				RenderConversionSweepGrid(allScenarios, settings.SellAnchor, settings.Strikes ?? 2, settings.Exp ?? 2, settings.Cash, settings.Risk, renderConsole, ascii: toText);
 			RenderScenarioTable(scenarios, positionLegs, settings, renderConsole, ascii: toText);
 		}
+		if (outOfBand > 0 && shortDteBand is { } band)
+			renderConsole.MarkupLine($"[dim]{outOfBand} roll/conversion candidate(s) selling a short outside {band.Min}-{band.Max} DTE ({Markup.Escape(settings.DteBand != null ? "--dte" : string.IsNullOrEmpty(aiCfg?.DefaultStrategy) ? $"{ticker} short-DTE band" : $"{ticker}.{aiCfg.DefaultStrategy} short-DTE band")}) not shown; --dte all sweeps every expiry.[/]");
+		if (scenarios.FirstOrDefault(s => s.EarningsInside.HasValue) is { EarningsInside: DateTime earningsDate })
+			renderConsole.MarkupLine($"[yellow]⚠ earnings {earningsDate:yyyy-MM-dd}[/][dim]: those shorts expire through the report. Their EV's realized-vol paths carry no earnings move, so the event premium reads as edge — they rank after the rest (the opener vetoes them).[/]");
 
 		if (toText)
 		{
@@ -452,7 +479,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		return 0;
 	}
 
-	/// <summary>--proposal: load a stored proposal snapshot and rebuild the <c>&lt;spec&gt;</c> — its legs at the
+	/// <summary>--proposal: load a stored proposal snapshot and rebuild the <c><spec></c> — its legs at the
 	/// entry mids captured when scored — then fall through to the normal live path so the diagnostic, quotes,
 	/// spot and management scenarios all reflect how the position is behaving NOW, not when it was proposed.
 	/// Only 'analyze risk --proposal' replays the frozen snapshot diagnostic verbatim. Returns false (with an
@@ -742,7 +769,8 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		string? EvNote = null,						// how ExpectedPnLPerContract was reached, shown after Rationale; replaced when the opener scorer re-values the scenario.
 		decimal OrderContractsNow = 0m,				// broker orders the scenario places now × the contracts each covers (Close all on 22 lots = 22; a two-order roll on 7 = 14). Prices its friction.
 		bool Swept = false,							// one of the swept candidates (a spread's short rolls, a single long's conversions), shortlisted by ShortlistSwept once every candidate has its EV.
-		bool IsLegIn = false)						// true iff this scenario keeps every existing leg and opens new ones that form one structure with them (a single long converted to a spread).
+		bool IsLegIn = false,						// true iff this scenario keeps every existing leg and opens new ones that form one structure with them (a single long converted to a spread).
+		DateTime? EarningsInside = null)			// a swept candidate whose new short expires through this earnings date (EventVeto.EarningsWithin): its EV carries no earnings move, so it ranks after the rest.
 	{
 		/// <summary>The rationale as displayed: the scenario's description, then how its EV was reached.</summary>
 		public string DisplayRationale => string.IsNullOrEmpty(EvNote) ? Rationale : $"{Rationale}; {EvNote}";
@@ -1295,7 +1323,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		return inverted ? "inverted diagonal" : "covered diagonal";
 	}
 
-	/// <summary>The lowest P&amp;L per share at expiry of the same-expiry vertical made by selling <paramref name="shortLeg"/> for
+	/// <summary>The lowest P&L per share at expiry of the same-expiry vertical made by selling <paramref name="shortLeg"/> for
 	/// <paramref name="credit"/> against <paramref name="longLeg"/> bought for <paramref name="longBasis"/>: credit − basis, less the strike width
 	/// when the short is on the long's in-the-money side. A floor ≥ 0 means the converted position cannot lose.</summary>
 	internal static decimal VerticalFloorPerShare(OptionParsed shortLeg, OptionParsed longLeg, decimal credit, decimal longBasis) =>
@@ -2210,6 +2238,37 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		return scenarios.Where(s => !s.Swept || selected.Contains(s)).ToList();
 	}
 
+	/// <summary>The short-DTE band the swept rolls and conversions are held to: --dte, else the strategy layer's enabled longDiagonal/longCalendar
+	/// shortDteMin–shortDteMax (their union). Null — every expiry — under --dte all, with --sell (its window is explicit), or with no such structure.</summary>
+	internal static (int Min, int Max)? ResolveShortDteBand(AnalyzePositionSettings settings, AIConfig? ai)
+	{
+		if (settings.SellAnchor != null || settings.DteAll) return null;
+		if (settings.DteBand is { } explicitBand) return explicitBand;
+		var structures = ai?.Opener.Structures;
+		if (structures == null) return null;
+		var enabled = new[] { structures.LongDiagonal, structures.LongCalendar }.Where(c => c.Enabled).ToList();
+		return enabled.Count == 0 ? null : (enabled.Min(c => c.ShortDteMin), enabled.Max(c => c.ShortDteMax));
+	}
+
+	/// <summary>Screens the swept candidates (rolls, single-long conversions): drops those selling a short outside <paramref name="band"/> and
+	/// marks those whose new short expires through earnings (<see cref="EventVeto.EarningsWithin"/>); every other scenario passes through.
+	/// Returns the kept scenarios and how many were dropped.</summary>
+	internal static (List<Scenario> Kept, int Dropped) ScreenSwept(IReadOnlyList<Scenario> scenarios, IReadOnlyList<PositionSnapshot> positionLegs, (int Min, int Max)? band, TickerEvents? events, int earningsBlackoutDaysAfter, DateTime asOf)
+	{
+		var held = positionLegs.Select(l => l.Symbol).ToHashSet(StringComparer.OrdinalIgnoreCase);
+		var kept = new List<Scenario>(scenarios.Count);
+		var dropped = 0;
+		foreach (var sc in scenarios)
+		{
+			if (!sc.Swept) { kept.Add(sc); continue; }
+			var newShorts = (sc.Book ?? []).SelectMany(b => b.Legs).Where(l => l.Action == LegAction.Sell && !held.Contains(l.Symbol)).Select(l => l.Parsed.ExpiryDate.Date).ToList();
+			if (band is { } b && newShorts.Any(exp => (exp - asOf.Date).Days < b.Min || (exp - asOf.Date).Days > b.Max)) { dropped++; continue; }
+			var earnings = newShorts.Count > 0 ? EventVeto.EarningsWithin(events, asOf, newShorts.Max(), earningsBlackoutDaysAfter) : null;
+			kept.Add(earnings is DateTime e ? sc with { Name = $"{sc.Name} ⚠ earnings {e:MM-dd}", EarningsInside = e } : sc);
+		}
+		return (kept, dropped);
+	}
+
 	/// <summary>The two-leg structure a swept scenario leaves held (<see cref="PairShapeLabel"/> of the short and long in its first Book structure);
 	/// "other" for anything that isn't one short and one long.</summary>
 	private static string SweptShape(Scenario sc)
@@ -2221,9 +2280,13 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 	}
 
 	/// <remarks>A modeled scenario left without an EV (the opener scorer could not value one of its structures) ranks after every one with an EV:
-	/// its fallback, the spot-pinned P&amp;L, is a best case, not a figure comparable with the others' EV.</remarks>
+	/// its fallback, the spot-pinned P&L, is a best case, not a figure comparable with the others' EV.
+	/// A swept candidate whose short spans earnings ranks after every fundable one that doesn't: the scorer's realized-vol paths carry no earnings
+	/// jump, so the event premium in that short reads as edge (2026-11-27 GME: a 12-11 27C through the 12-08 report at IV 64% vs 45% for 12-04
+	/// scored +$485 against +$23) — the same shorts the opener vetoes.</remarks>
 	internal static List<Scenario> OrderScenariosForDisplay(IEnumerable<Scenario> scenarios, decimal? availableCash, decimal riskAversion) => scenarios
 		.OrderByDescending(s => IsScenarioFundable(s, availableCash))
+		.ThenBy(s => s.EarningsInside.HasValue)
 		.ThenByDescending(s => s.ExpectedPnLPerContract.HasValue || s.Book == null)
 		.ThenByDescending(s => RiskAdjustedRankScore(s, riskAversion))
 		.ToList();
@@ -2576,7 +2639,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 			{
 				if (!cells.TryGetValue((e, strike), out var sc)) { row.Add("[dim]—[/]"); continue; }
 				var ev = EvTotal(sc);
-				var partial = sc.Book!.Count > 1 ? $" [dim]p{sc.Book[0].Qty}[/]" : "";
+				var partial = (sc.Book!.Count > 1 ? $" [dim]p{sc.Book[0].Qty}[/]" : "") + (sc.EarningsInside.HasValue ? " [yellow]e[/]" : "");
 				var text = $"{(e == center.ExpiryDate.Date && strike == center.Strike ? "◆ " : "")}{Money(ev)}";
 				var color = ev >= 0m ? "green" : "red";
 				row.Add($"{(ev == best ? $"[bold {color}]{text}[/]" : $"[{color}]{text}[/]")}{partial}");
@@ -2586,7 +2649,7 @@ internal sealed class AnalyzePositionCommand : AsyncCommand<AnalyzePositionSetti
 		string Reference(string name) => scenarios.FirstOrDefault(s => s.Name == name) is { ExpectedPnLPerContract: decimal ev } sc ? $"{name} {Money(ev * sc.Qty)}" : $"{name} —";
 		table.Title(anchor == null ? "Conversion EV around the best conversion" : "Conversion EV by short strike × expiry");
 		console.Write(table);
-		console.MarkupLine($"[dim]Total EV per conversion; pN = partial on N contracts (what the cash funds); ◆ = {(anchor == null ? "the best of the sweep" : "--sell")}. For reference: {Reference("Hold to expiry")} · {Reference("Close now")}.[/]");
+		console.MarkupLine($"[dim]Total EV per conversion; pN = partial on N contracts (what the cash funds); e = short spans earnings (ranked last); ◆ = {(anchor == null ? "the best of the sweep" : "--sell")}. For reference: {Reference("Hold to expiry")} · {Reference("Close now")}.[/]");
 		console.WriteLine();
 	}
 

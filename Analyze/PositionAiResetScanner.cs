@@ -241,7 +241,7 @@ internal static class PositionAiResetScanner
 		return results;
 	}
 
-	/// <summary><paramref name="sc"/> valued on the opener scorer: the P&amp;L of closing everything at mid now plus each held structure's forward EV
+	/// <summary><paramref name="sc"/> valued on the opener scorer: the P&L of closing everything at mid now plus each held structure's forward EV
 	/// (managed when the scorer models exits) times its contracts. A structure the scorer cannot value leaves the scenario without an EV.</summary>
 	/// <returns>The scenario, and for an add with margin, the added structure's expected profit per added dollar.</returns>
 	/// <param name="perOrderFriction">One broker order's friction per contract (<see cref="RealizedExpectancy.FrictionPerOrderContract"/>). The scorer

@@ -23,15 +23,10 @@ internal static class EventVeto
 		if (!cfg.Enabled || events == null) return false;
 		var vetoDate = (vetoNow ?? asOf).Date;
 
-		if (events.NextEarningsDate.HasValue && HasShortLeg(skel.StructureKind))
+		if (HasShortLeg(skel.StructureKind) && EarningsWithin(events, vetoDate, skel.TargetExpiry, cfg.EarningsBlackoutDaysAfter) is DateTime earnings)
 		{
-			var earnings = events.NextEarningsDate.Value.Date;
-			var blackoutEnd = skel.TargetExpiry.Date.AddDays(Math.Max(0, cfg.EarningsBlackoutDaysAfter));
-			if (earnings >= vetoDate && earnings <= blackoutEnd)
-			{
-				reason = $"earnings on {earnings:yyyy-MM-dd} ≤ target expiry {skel.TargetExpiry:yyyy-MM-dd}+{cfg.EarningsBlackoutDaysAfter}d";
-				return true;
-			}
+			reason = $"earnings on {earnings:yyyy-MM-dd} ≤ target expiry {skel.TargetExpiry:yyyy-MM-dd}+{cfg.EarningsBlackoutDaysAfter}d";
+			return true;
 		}
 
 		if (cfg.RejectShortCallsThroughExDiv && events.NextExDividendDate.HasValue)
@@ -54,6 +49,15 @@ internal static class EventVeto
 		}
 
 		return false;
+	}
+
+	/// <summary>The next earnings date when it falls on or after <paramref name="vetoDate"/> and no later than <paramref name="shortExpiry"/> +
+	/// <paramref name="blackoutDaysAfter"/> — a short expiring then is exposed to the earnings move; null otherwise.</summary>
+	internal static DateTime? EarningsWithin(TickerEvents? events, DateTime vetoDate, DateTime shortExpiry, int blackoutDaysAfter)
+	{
+		if (events?.NextEarningsDate is not DateTime next) return null;
+		var earnings = next.Date;
+		return earnings >= vetoDate.Date && earnings <= shortExpiry.Date.AddDays(Math.Max(0, blackoutDaysAfter)) ? earnings : null;
 	}
 
 	/// <summary>True when the structure type contains at least one short leg whose payoff is exposed
