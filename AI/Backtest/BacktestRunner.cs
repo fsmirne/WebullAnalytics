@@ -100,9 +100,11 @@ internal sealed class BacktestRunner
 	private static readonly TimeSpan MarketOpenTime = TimeSpan.FromHours(9) + TimeSpan.FromMinutes(30);
 	private static readonly TimeSpan MarketCloseTime = TimeSpan.FromHours(16);
 
-	/// <summary>The session's close on <paramref name="step"/>'s day (16:00 ET, 13:00 on a half-day): the instant
-	/// open positions are marked at for the equity curve and the window-end unrealized P&L.</summary>
-	internal static DateTime SessionCloseEt(DateTime step) => step.Date.Add(MarketCalendar.CloseTimeEt(step.Date));
+	/// <summary>The minute label open positions are marked at for the equity curve and the window-end unrealized P&L: the session's
+	/// last RTH minute (15:59 ET, 12:59 on a half-day), whose quote-store row is the book struck AT the close (16:00 / 13:00,
+	/// <see cref="QuoteStoreCache.BookInstant"/>). The close instant itself is not a label to read: row 13:00 is the 13:01 book, a
+	/// minute after the close (2026-11-27: the 702C/701C + 717P/731P book marked $16,942 there vs $17,169.50 at the close).</summary>
+	internal static DateTime SessionCloseMarkLabelEt(DateTime step) => step.Date.Add(MarketCalendar.CloseTimeEt(step.Date)) - QuoteStoreCache.BookLag;
 
 	public BacktestRunner(AIConfig config, SimulatedBook book, BacktestPositionSource positions, IBacktestQuoteSource quotes, HistoricalBarCache bars, HistoricalPriceCache closeCache, int topNPerStep, bool oracle = false, bool profile = false, int? fixedContracts = null, string pricingMode = SuggestionPricing.Mid, decimal? cross = null, int scanStride = 1, IReadOnlyDictionary<string, IReadOnlyList<DividendEvent>>? dividendsByRoot = null, bool splitStructures = false, IReadOnlyList<ProposalReplayOpen>? replayOpens = null, IReadOnlyList<(DateTime Date, double Rate)>? rateHistory = null, IntradayBarCache? intradayBars = null, int cascadeCadenceMinutes = 10, bool cascadeRecache = false)
 	{
@@ -272,7 +274,7 @@ internal sealed class BacktestRunner
 			// last RTH book, 13:00 on a half-day). `step` is the 09:30 open: marking there valued every position at
 			// the morning's book after the whole session had been walked, so a position opened at 09:30 marked at
 			// its own fill and the day's move never reached equity, the drawdown, or the window-end unrealized.
-			var mtm = await ComputeOpenMarkAsync(SessionCloseEt(step), cancellation);
+			var mtm = await ComputeOpenMarkAsync(SessionCloseMarkLabelEt(step), cancellation);
 			var equity = _book.Cash + mtm;
 			equityCurve.Add((step.Date, equity));
 			if (equity > peakEquity) peakEquity = equity;
@@ -304,7 +306,7 @@ internal sealed class BacktestRunner
 		}
 
 		// Final per-lineage MTM for still-open positions so the renderer can compute unrealized P&L.
-		var endMtmByLineage = await ComputeOpenMarkPerLineageAsync(steps.Count > 0 ? SessionCloseEt(steps[^1]) : until, cancellation);
+		var endMtmByLineage = await ComputeOpenMarkPerLineageAsync(steps.Count > 0 ? SessionCloseMarkLabelEt(steps[^1]) : until, cancellation);
 
 		return new BacktestResult(
 			StartingCash: startingCash,

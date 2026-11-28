@@ -30,29 +30,27 @@ internal static class BacktestSummaryRenderer
 	/// <summary>--book-cmd: emit a ready-to-paste <c>wa report</c> command reconstructing the whole
 	/// window's book from the fill ledger. Every fill becomes one ';'-separated group of
 	/// <c>side:SYMBOL:qty@price</c> legs priced at its executed fill. Fed through <c>report --source none
-	/// --trade … --date &lt;window-end&gt;</c> (no real trade history), each group is valued as of the backtest's last trading day: a
-	/// still-open position marks to that date (unrealized P&L), while a closed lineage's Open + Close legs
-	/// offset so the mark cancels and the group nets to its realized P&L. Summed, the combined book equals the
-	/// backtest's total P&L for the window — GROSS of the per-contract fees the backtest nets into P&L, and
-	/// with open legs BS-decayed from the current chain rather than the historical NBBO the backtest used
-	/// (Schwab can't backfill), so open-leg marks match only approximately. The <c>--date</c> is what keeps
-	/// the two aligned: without it, analyze values open legs at run-time and picks up extra theta since the
-	/// window end. Every fill (not just still-open ones) is included so closed lineages net correctly.</summary>
+	/// --trade … --date <window-end close></c> (no real trade history), each group is valued at the instant the backtest marked its book:
+	/// a still-open position marks to that session's closing book from the quote store (unrealized P&L), while a closed lineage's Open +
+	/// Close legs offset so the mark cancels and the group nets to its realized P&L. Summed, the combined book equals the backtest's total
+	/// P&L for the window GROSS of the per-contract fees the backtest nets into P&L. The <c>--date</c> is what keeps the two aligned:
+	/// without it, report values open legs at run-time on the live chain. Every fill (not just still-open ones) is included so closed
+	/// lineages net correctly.</summary>
 	private static void RenderBookCommand(BacktestResult result)
 	{
 		var groups = BuildFillLegGroups(result.Fills);
 		if (groups.Count == 0) { AnsiConsole.MarkupLine("[dim]No fills — no book command.[/]"); return; }
 
 		var spec = string.Join(";", groups);
-		// Pin the evaluation to the backtest's last valued trading day (EquityCurve tail) so still-open legs
-		// decay to the SAME instant the backtest marked them at. Without --date, the report values them at
-		// run-time — adding however many days of theta have elapsed since the window end, which is the usual
-		// "totals don't match" surprise. No --vendor: let the config default apply rather than forcing one.
-		var endDate = result.EquityCurve.Count > 0 ? result.EquityCurve[^1].Date : (DateTime?)null;
-		var dateArg = endDate.HasValue ? $" --date {endDate.Value:yyyy-MM-dd}" : "";
+		// Pin the evaluation to the instant the backtest marked its open book at: the last valued trading day's session close
+		// (EquityCurve tail + MarketCalendar.CloseTimeEt). A past --date instant reads the store row one minute earlier, the book struck at
+		// that instant — the row BacktestRunner.SessionCloseMarkLabelEt marks at. A date alone would mean 10:00 ET (AsOf.DefaultTime), hours
+		// before the mark; no --date at all values the legs at run-time. No --vendor: the config default applies.
+		var endDate = result.EquityCurve.Count > 0 ? result.EquityCurve[^1].Date.Date : (DateTime?)null;
+		var dateArg = endDate.HasValue ? $" --date {(endDate.Value + MarketCalendar.CloseTimeEt(endDate.Value)).ToString("yyyy-MM-dd'T'HH:mm", CultureInfo.InvariantCulture)}" : "";
 		AnsiConsole.WriteLine();
-		AnsiConsole.MarkupLine("[bold]Combined book (report) — open legs mark at the window-end date, closed lineages net to realized P&L:[/]");
-		AnsiConsole.MarkupLine("[dim]  Reproduces the backtest total GROSS of fees (the backtest nets per-contract commissions into P&L); open legs are BS-decayed from the current chain, not historical NBBO.[/]");
+		AnsiConsole.MarkupLine("[bold]Combined book (report) — open legs mark at the window-end session close, closed lineages net to realized P&L:[/]");
+		AnsiConsole.MarkupLine("[dim]  Reproduces the backtest total GROSS of fees (the backtest nets per-contract commissions into P&L); open legs mark at the window-end session's closing book from the quote store.[/]");
 		// Raw Console.WriteLine, NOT AnsiConsole: Spectre hard-wraps to the console width, which shatters the
 		// (often long) command across lines and breaks copy-paste. Raw stdout emits one line the terminal only
 		// soft-wraps, so it still copies as a single command.
